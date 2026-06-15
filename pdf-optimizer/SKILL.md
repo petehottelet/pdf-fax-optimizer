@@ -1,12 +1,12 @@
 ---
 name: pdf-optimizer
 description: >-
-  Optimize a PDF for a delivery channel: shrink it for email/web, or convert it
-  to a fax-ready 1-bit bilevel file. Use when someone wants to compress a PDF,
-  hit a target file size, make a PDF faxable or black-and-white for the fax, fix
-  a document that looks muddy or garbled when faxed, halftone photos for fax,
-  downsample images, or linearize for fast web view. Triggers include "too big
-  to email", "prep these scans to fax", and "why does my fax come out garbled".
+  Maximize document quality and readability for a delivery channel — above all,
+  make a PDF arrive LEGIBLE over a noisy fax network (a fax's whole job is to be
+  read), or shrink one for email/web. Use to make a PDF faxable, fix a fax that
+  comes out muddy, garbled, or unreadable, keep small text and signatures
+  readable over fax, halftone photos for fax, compress a PDF, or hit a target
+  file size. Triggers: "prep these scans to fax", "why is my fax unreadable".
 compatibility: >-
   Requires Python 3 with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
   img2pdf, plus the qpdf CLI. Ghostscript is optional. Run
@@ -19,12 +19,21 @@ This skill optimizes PDFs for a **delivery channel**, not in the abstract. The
 single most important question is *where is this PDF going?* — because the right
 trade-offs for "email it" are the opposite of the right trade-offs for "fax it."
 
+**For fax, legibility is the entire objective.** A fax exists to be *read on the
+other end*, often after surviving a low-resolution, 1-bit, lossy-by-design
+Group-3 transmission over a noisy phone line. So in fax mode this skill is built
+to **maximize document quality and enhance reception/readability** — keep text
+crisp, small fonts and signatures intact, and photos recognizable — *first*.
+Smaller files and faster transmission are welcome side effects, never the goal:
+a tiny fax that arrives unreadable is a failure. When a trade-off is forced,
+choose what stays readable on the receiving machine.
+
 ## Step 0 — Pick the mode
 
 | Signal from the user | Mode | What "good" means |
 |---|---|---|
 | "too big to email", "shrink", "compress", "target N MB", "web view" | **size** | Smallest file that stays visually faithful, in color/grayscale |
-| "fax", "faxable", "bilevel", "black & white for the fax", "comes out garbled/muddy", "send to the clinic's fax" | **fax** | A 1-bit, fax-native PDF (or TIFF) that survives Group-3 transmission *and stays legible* |
+| "fax", "faxable", "bilevel", "black & white for the fax", "comes out garbled/muddy", "send to the clinic's fax" | **fax** | A 1-bit, fax-native PDF (or TIFF) that **arrives readable** on the receiving machine — maximum legibility first; small size and speed are secondary |
 
 If genuinely ambiguous, ask one question. Don't guess between size and fax —
 they produce very different artifacts.
@@ -59,6 +68,12 @@ This is the substantive part of the skill, and the part most tools get wrong.
 **Read `references/fax-optimization.md` before running fax mode** — it explains
 the constraints below and why each knob exists. Do not skip it; the defaults
 only make sense once you understand the Group-3 transmission model.
+
+The goal of every choice here is **a document that arrives readable.** Each knob
+exists to protect legibility against a lossy channel — keeping edges sharp,
+rescuing faint strokes, and choosing halftones that don't collapse to mud after
+the receiving machine re-thresholds. Optimize for what the recipient can *read*,
+not for the smallest byte count.
 
 The core constraint: Group-3 fax is **1-bit bilevel** (pure black/white, no
 gray) at fixed, *anisotropic* resolutions, compressed with run-length codes
@@ -130,9 +145,12 @@ Instead of flags, pass `--config config.json`. Schema and an annotated example:
 
 Always finish by telling the user the output path(s), the before/after size (or
 for fax, total pages + estimated transmission time), and any warnings the report
-flagged. For fax jobs, offer to render a **preview** of the actual bilevel
-output (`--preview-page N` writes a PNG of exactly what will be transmitted) so
-they can eyeball legibility before sending.
+flagged. For fax jobs, **legibility is the acceptance test**: always offer to
+render a **preview** of the actual bilevel output (`--preview-page N` writes a
+PNG of exactly what will be transmitted) so they can confirm it's readable
+before sending. If anything is borderline — small text, faint signatures,
+muddy photos — recommend the knob that recovers it (`--thicken`, a higher
+`--fax-resolution`, or a cleaner dither) rather than shipping an unreadable fax.
 
 ## Reference files
 

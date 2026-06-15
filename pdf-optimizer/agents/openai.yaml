@@ -4,5 +4,6 @@
 name: pdf-optimizer
 display_name: PDF Optimizer (email & fax)
 description: >-
-  Channel-aware PDF optimization — shrink for email/web, or convert to a
-  fax-ready 1-bit CCITT-G4 PDF/TIFF that survives Group-3 transmission.
+  Maximize document quality and readability over a fax network — convert a PDF
+  to a 1-bit CCITT-G4 PDF/TIFF that arrives LEGIBLE after Group-3 transmission
+  (a fax's whole job is to be read). Also shrinks PDFs for email/web.

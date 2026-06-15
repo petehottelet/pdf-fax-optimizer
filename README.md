@@ -3,17 +3,27 @@
 A portable [Agent Skill](https://www.anthropic.com/news/skills) that teaches an
 AI coding agent to optimize PDFs for a **specific delivery channel**:
 
+- **`fax` mode** — **maximize document quality and readability over a fax
+  network.** Convert a PDF into a fax-native **1-bit bilevel CCITT-G4** PDF (or
+  Class-F multipage TIFF) that survives the lossy Group-3 transmission and
+  **arrives legible on the receiving machine.**
 - **`size` mode** — shrink a PDF for email/web (downsample over-resolution
   images, re-encode, qpdf structural cleanup, linearize for fast web view).
-- **`fax` mode** — convert a PDF into a fax-native **1-bit bilevel CCITT-G4**
-  PDF (or Class-F multipage TIFF) that survives Group-3 transmission *and stays
-  legible*.
 
-The skill is built around one idea: the right trade-offs for "email it" are the
-opposite of the right trade-offs for "fax it." Fax mode in particular models the
-Group-3 constraint (1-bit, anisotropic resolution, run-length compression along
-each scanline) and does MRC-lite segmentation — crisp hard-thresholded text,
-halftoned photos — instead of dithering the whole page into mud.
+> **A fax's whole job is to be READ.** That is the single most important thing
+> about this skill. Fax transmission is low-resolution, 1-bit, and lossy by
+> design over a noisy phone line, so fax mode optimizes for **legibility on the
+> other end first** — crisp text, intact small fonts and signatures,
+> recognizable photos. Smaller files and faster transmission are welcome side
+> effects, never the goal: a tiny fax that arrives unreadable is a failure.
+
+To do that, fax mode models the Group-3 constraint (1-bit, anisotropic
+resolution, run-length compression along each scanline) and does MRC-lite
+segmentation — crisp hard-thresholded text, halftoned photos — instead of
+dithering the whole page into mud. It defends fine detail (background flatten,
+despeckle, deskew, optional stroke thickening), warns about content that won't
+survive bilevel, and lets you **preview exactly what will be transmitted** so
+you can confirm it's readable before sending.
 
 The `SKILL.md` format is an open standard, so the same skill works in **Claude
 Code, Claude.ai, OpenAI Codex, Gemini CLI, GitHub Copilot**, and other
