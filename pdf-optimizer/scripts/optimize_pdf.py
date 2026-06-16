@@ -1,142 +1,24 @@
 #!/usr/bin/env python3
-"""PDF Optimizer — channel-aware PDF optimization.
+"""PDF fax optimizer — convert a PDF into a fax-ready 1-bit CCITT-G4 PDF/TIFF.
 
-Two families of behavior:
+The whole job is a document that arrives LEGIBLE over a Group-3 fax line. See
+SKILL.md and references/ for the why behind each knob. Flags override any values
+from --config.
 
-  --mode size           shrink for email/web (downsample + re-encode + qpdf)
-  --mode size-lossless  qpdf structural/stream optimization + linearize only
-  --mode fax            convert to fax-native 1-bit CCITT-G4 PDF/TIFF
-
-See SKILL.md and references/ for the why behind each knob. Flags override any
-values from --config.
+Need to shrink a PDF for email/web instead? Use the companion skill:
+https://github.com/petehottelet/pdf-email-optimizer
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shutil
-import subprocess
 import sys
-import tempfile
-
-import fitz  # PyMuPDF
-from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import fax_pipeline as fax  # noqa: E402
 
 
-# --------------------------------------------------------------------------- #
-# size mode                                                                   #
-# --------------------------------------------------------------------------- #
-def effective_dpi(page, xref, pix_w, pix_h):
-    """Approximate the on-page rendered dpi of an image."""
-    try:
-        rects = page.get_image_rects(xref)
-    except Exception:
-        rects = []
-    if not rects:
-        return None
-    r = rects[0]
-    win = max(r.width, 1) / 72.0
-    hin = max(r.height, 1) / 72.0
-    return max(pix_w / win, pix_h / hin)
-
-
-def optimize_size(in_pdf, out_pdf, target_dpi, jpeg_quality, linearize,
-                  skip_below_dpi):
-    doc = fitz.open(in_pdf)
-    reencoded = 0
-    for page in doc:
-        for img in page.get_images(full=True):
-            xref = img[0]
-            try:
-                info = doc.extract_image(xref)
-            except Exception:
-                continue
-            if info.get("bpc") == 1:
-                continue  # already bilevel; leave to qpdf
-            try:
-                pil = Image.open(io_bytes(info["image"]))
-            except Exception:
-                continue
-            edpi = effective_dpi(page, xref, pil.width, pil.height)
-            if edpi and skip_below_dpi and edpi <= target_dpi * 1.1:
-                continue
-            scale = (target_dpi / edpi) if edpi and edpi > target_dpi else 1.0
-            new_w = max(1, int(pil.width * scale))
-            new_h = max(1, int(pil.height * scale))
-            if scale < 1.0:
-                pil = pil.resize((new_w, new_h), Image.LANCZOS)
-            buf = io_buffer()
-            pil.convert("RGB").save(buf, format="JPEG", quality=jpeg_quality,
-                                    optimize=True)
-            try:
-                doc.update_stream(xref, buf.getvalue(), new=False)
-                # re-declare as DCT/JPEG
-                doc.xref_set_key(xref, "Filter", "/DCTDecode")
-                doc.xref_set_key(xref, "ColorSpace", "/DeviceRGB")
-                doc.xref_set_key(xref, "BitsPerComponent", "8")
-                doc.xref_set_key(xref, "Width", str(new_w))
-                doc.xref_set_key(xref, "Height", str(new_h))
-                reencoded += 1
-            except Exception:
-                continue
-
-    tmp = tempfile.mktemp(suffix=".pdf")
-    doc.save(tmp, garbage=4, deflate=True)
-    doc.close()
-    _qpdf(tmp, out_pdf, linearize)
-    os.unlink(tmp)
-    return {
-        "mode": "size",
-        "input": in_pdf, "output": out_pdf,
-        "input_bytes": os.path.getsize(in_pdf),
-        "output_bytes": os.path.getsize(out_pdf),
-        "images_reencoded": reencoded,
-    }
-
-
-def optimize_size_lossless(in_pdf, out_pdf, linearize):
-    _qpdf(in_pdf, out_pdf, linearize, lossless=True)
-    return {
-        "mode": "size-lossless",
-        "input": in_pdf, "output": out_pdf,
-        "input_bytes": os.path.getsize(in_pdf),
-        "output_bytes": os.path.getsize(out_pdf),
-    }
-
-
-def _qpdf(src, dst, linearize, lossless=False):
-    if not shutil.which("qpdf"):
-        # qpdf missing: fall back to a plain copy so we still produce output
-        shutil.copy(src, dst)
-        return
-    cmd = ["qpdf", src, dst, "--object-streams=generate",
-           "--compress-streams=y", "--recompress-flate"]
-    if linearize:
-        cmd.append("--linearize")
-    r = subprocess.run(cmd, capture_output=True)
-    # qpdf returns 3 for warnings (still writes output); only treat >3 as fatal
-    if r.returncode not in (0, 3) or not os.path.exists(dst):
-        shutil.copy(src, dst)
-
-
-# small lazy io helpers (avoid top-level import noise)
-def io_bytes(b):
-    import io
-    return io.BytesIO(b)
-
-
-def io_buffer():
-    import io
-    return io.BytesIO()
-
-
-# --------------------------------------------------------------------------- #
-# config + CLI                                                                #
-# --------------------------------------------------------------------------- #
 def load_config(path):
     if not path:
         return {}
@@ -146,8 +28,10 @@ def load_config(path):
 
 def build_fax_options(cfg, args) -> fax.FaxOptions:
     fc = cfg.get("fax", {})
+
     def pick(flag, key, default):
         return flag if flag is not None else fc.get(key, default)
+
     return fax.FaxOptions(
         resolution=pick(args.fax_resolution, "resolution", "fine"),
         dither=pick(args.dither, "dither", "auto"),
@@ -163,18 +47,14 @@ def build_fax_options(cfg, args) -> fax.FaxOptions:
 
 
 def main():
-    p = argparse.ArgumentParser(description="Channel-aware PDF optimizer")
+    p = argparse.ArgumentParser(description="Convert a PDF to a fax-ready "
+                                            "1-bit CCITT-G4 PDF/TIFF")
     p.add_argument("input")
     p.add_argument("-o", "--output", required=True)
-    p.add_argument("--mode", choices=["size", "size-lossless", "fax"],
-                   default=None)
+    # Kept for backward-compatible invocations; fax is the only mode.
+    p.add_argument("--mode", choices=["fax"], default="fax")
     p.add_argument("--config")
     p.add_argument("--report")
-    # size
-    p.add_argument("--target-dpi", type=int, default=None)
-    p.add_argument("--jpeg-quality", type=int, default=None)
-    p.add_argument("--linearize", action="store_true", default=None)
-    # fax
     p.add_argument("--fax-resolution",
                    choices=["standard", "fine", "superfine"], default=None)
     p.add_argument("--dither",
@@ -203,48 +83,34 @@ def main():
     args = p.parse_args()
 
     cfg = load_config(args.config)
-    mode = args.mode or cfg.get("mode", "size")
+    opt = build_fax_options(cfg, args)
 
-    if mode == "fax":
-        opt = build_fax_options(cfg, args)
-        comparison = None
-        if args.compare_page:
-            methods = ([m.strip() for m in args.compare_methods.split(",")]
-                       if args.compare_methods else None)
-            png = (os.path.splitext(args.output)[0]
-                   + f".compare_p{args.compare_page}.png")
-            comparison = fax.render_comparison(
-                args.input, args.compare_page, png, opt, methods)
-            print(f"Comparison contact sheet: {png}")
-            print(f"  recommended: {comparison['recommended']}  "
-                  f"(smallest: {comparison['smallest']})")
-            print(f"  why: {comparison['reason']}")
-            print("  spend your eye tokens \u2014 per-method G4 size / page:")
-            for m, mm in comparison["methods"].items():
-                star = "  <- recommended" if m == comparison["recommended"] else ""
-                print(f"    {m:11s} {mm['encoded_bytes'] / 1024:6.0f} KB  "
-                      f"~{mm['est_transmission_s']:.0f}s{star}")
-        if args.preview_page:
-            png = os.path.splitext(args.output)[0] + f".preview_p{args.preview_page}.png"
-            fax.render_preview(args.input, args.preview_page, png, opt)
-            print(f"Preview written: {png}")
-        report = fax.convert_pdf(args.input, args.output, opt)
-        if comparison:
-            report["comparison"] = comparison
-    elif mode == "size-lossless":
-        lin = args.linearize if args.linearize is not None else \
-            cfg.get("size", {}).get("linearize", True)
-        report = optimize_size_lossless(args.input, args.output, lin)
-    else:  # size
-        sc = cfg.get("size", {})
-        report = optimize_size(
-            args.input, args.output,
-            target_dpi=args.target_dpi or sc.get("target_dpi", 150),
-            jpeg_quality=args.jpeg_quality or sc.get("jpeg_quality", 75),
-            linearize=(args.linearize if args.linearize is not None
-                       else sc.get("linearize", True)),
-            skip_below_dpi=sc.get("skip_below_dpi", True),
-        )
+    comparison = None
+    if args.compare_page:
+        methods = ([m.strip() for m in args.compare_methods.split(",")]
+                   if args.compare_methods else None)
+        png = (os.path.splitext(args.output)[0]
+               + f".compare_p{args.compare_page}.png")
+        comparison = fax.render_comparison(
+            args.input, args.compare_page, png, opt, methods)
+        print(f"Comparison contact sheet: {png}")
+        print(f"  recommended: {comparison['recommended']}  "
+              f"(smallest: {comparison['smallest']})")
+        print(f"  why: {comparison['reason']}")
+        print("  spend your eye tokens \u2014 per-method G4 size / page:")
+        for m, mm in comparison["methods"].items():
+            star = "  <- recommended" if m == comparison["recommended"] else ""
+            print(f"    {m:11s} {mm['encoded_bytes'] / 1024:6.0f} KB  "
+                  f"~{mm['est_transmission_s']:.0f}s{star}")
+
+    if args.preview_page:
+        png = os.path.splitext(args.output)[0] + f".preview_p{args.preview_page}.png"
+        fax.render_preview(args.input, args.preview_page, png, opt)
+        print(f"Preview written: {png}")
+
+    report = fax.convert_pdf(args.input, args.output, opt)
+    if comparison:
+        report["comparison"] = comparison
 
     report_path = args.report or cfg.get("report")
     if report_path:
@@ -258,28 +124,23 @@ def _print_summary(report):
     ib, ob = report["input_bytes"], report["output_bytes"]
     if ib:
         change = (ob - ib) / ib * 100
-        if change <= 0:
-            size_note = f"{abs(change):.1f}% smaller"
-        else:
-            size_note = f"{change:.1f}% larger"
+        size_note = (f"{abs(change):.1f}% smaller" if change <= 0
+                     else f"{change:.1f}% larger")
     else:
         size_note = "n/a"
     print(f"mode: {report['mode']}")
     print(f"input:  {ib:,} bytes")
     print(f"output: {ob:,} bytes  ({size_note})")
-    if report["mode"] == "fax":
-        print(f"pages:  {len(report['pages'])}")
-        dithers = sorted({p.get("dither", "") for p in report["pages"]} - {""})
-        if dithers:
-            print(f"halftone used: {', '.join(dithers)}")
-        print(f"est. transmission: {report['total_est_transmission_s']:.0f}s "
-              f"(~{report['total_est_transmission_s']/60:.1f} min)")
-        if report.get("comparison"):
-            print(f"comparison sheet: {report['comparison']['output']}")
-        if report["warnings"]:
-            print("warnings: " + ", ".join(report["warnings"]))
-    elif report["mode"] == "size":
-        print(f"images re-encoded: {report.get('images_reencoded', 0)}")
+    print(f"pages:  {len(report['pages'])}")
+    dithers = sorted({p.get("dither", "") for p in report["pages"]} - {""})
+    if dithers:
+        print(f"halftone used: {', '.join(dithers)}")
+    print(f"est. transmission: {report['total_est_transmission_s']:.0f}s "
+          f"(~{report['total_est_transmission_s'] / 60:.1f} min)")
+    if report.get("comparison"):
+        print(f"comparison sheet: {report['comparison']['output']}")
+    if report["warnings"]:
+        print("warnings: " + ", ".join(report["warnings"]))
 
 
 if __name__ == "__main__":

@@ -45,21 +45,17 @@ def main():
         ok = ok and good
         print(f"  {pkg:24s} {status}")
 
-    print("CLI tools:")
-    for tool, required in (("qpdf", True), ("gs", False)):
+    # Fax mode embeds CCITT-G4 via img2pdf and does not require any CLI tool.
+    # qpdf / ghostscript are optional (handy for separate PDF work) — reported
+    # for convenience only.
+    print("CLI tools (optional):")
+    for tool in ("qpdf", "gs"):
         path = shutil.which(tool)
-        label = "required" if required else "optional"
-        if path:
-            print(f"  {tool:24s} present ({label})")
-        else:
-            print(f"  {tool:24s} MISSING ({label})")
-            if required:
-                ok = False
+        print(f"  {tool:24s} {'present' if path else 'missing'} (optional)")
 
     if not ok:
-        print("\nSome required dependencies are missing. qpdf must be installed "
-              "via the system package manager; pip packages should self-install "
-              "above. If a pip install failed, check network/proxy settings.")
+        print("\nSome required pip packages are missing. They should self-install "
+              "above; if a pip install failed, check network/proxy settings.")
         sys.exit(1)
     print("\nAll required dependencies satisfied.")
 

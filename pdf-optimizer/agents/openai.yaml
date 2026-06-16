@@ -2,8 +2,8 @@
 # The SKILL.md frontmatter (name/description) remains the source of truth for
 # triggering; this only customizes how the skill is presented in Codex.
 name: pdf-optimizer
-display_name: PDF Optimizer (email & fax)
+display_name: PDF Fax Optimizer
 description: >-
   Maximize document quality and readability over a fax network — convert a PDF
   to a 1-bit CCITT-G4 PDF/TIFF that arrives LEGIBLE after Group-3 transmission
-  (a fax's whole job is to be read). Also shrinks PDFs for email/web.
+  (a fax's whole job is to be read).

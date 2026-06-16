@@ -1,6 +1,6 @@
 # Fax Optimization Reference
 
-Read this before running `--mode fax`. The defaults in the pipeline only make
+Read this before running the skill. The defaults in the pipeline only make
 sense once the Group-3 model below is clear.
 
 ## Table of contents
@@ -235,7 +235,7 @@ The output should be cheap and robust to send, not just small on disk:
   flatten, despeckle (morphology), deskew (min-area-rect / projection), and
   thicken (dilation).
 - **img2pdf** embeds the G4 TIFF into a PDF *without re-encoding* (the PDF carries
-  a `CCITTFaxDecode` filter). **qpdf** linearizes the result.
+  a `CCITTFaxDecode` filter). No CLI tools are required.
 - **Leptonica** (not installed here) is the production-grade choice for
   bilevel/MRC/despeckle if you move this off the current box; Ghostscript's
   `tiffg4` device + `-r204x196` is an alternative rasterizer when available.

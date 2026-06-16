@@ -1,73 +1,47 @@
 ---
 name: pdf-optimizer
 description: >-
-  Maximize document quality and readability for a delivery channel — above all,
-  make a PDF arrive LEGIBLE over a noisy fax network (a fax's whole job is to be
-  read), or shrink one for email/web. Use to make a PDF faxable, fix a fax that
-  comes out muddy, garbled, or unreadable, keep small text and signatures
-  readable over fax, halftone photos for fax, compress a PDF, or hit a target
-  file size. Triggers: "prep these scans to fax", "why is my fax unreadable".
+  Maximize document quality and readability when sending a PDF over a fax
+  network — make it arrive LEGIBLE after a noisy, 1-bit Group-3 transmission (a
+  fax's whole job is to be read). Use to make a PDF faxable, convert it to
+  black-and-white/bilevel for the fax, fix a fax that comes out muddy, garbled,
+  or unreadable, keep small text and signatures readable over fax, or halftone
+  photos for fax. Triggers: "prep these scans to fax", "why is my fax unreadable".
 compatibility: >-
   Requires Python 3 with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
-  img2pdf, plus the qpdf CLI. Ghostscript is optional. Run
+  img2pdf. No CLI tools are required (qpdf/Ghostscript are optional). Run
   scripts/check_deps.py first; it installs the pip packages if missing.
 ---
 
-# PDF Optimizer
+# PDF Fax Optimizer
 
-This skill optimizes PDFs for a **delivery channel**, not in the abstract. The
-single most important question is *where is this PDF going?* — because the right
-trade-offs for "email it" are the opposite of the right trade-offs for "fax it."
+This skill converts a PDF into a **fax-ready** file and, above all, one that
+**arrives LEGIBLE** on the receiving machine.
 
-**For fax, legibility is the entire objective.** A fax exists to be *read on the
-other end*, often after surviving a low-resolution, 1-bit, lossy-by-design
-Group-3 transmission over a noisy phone line. So in fax mode this skill is built
-to **maximize document quality and enhance reception/readability** — keep text
-crisp, small fonts and signatures intact, and photos recognizable — *first*.
-Smaller files and faster transmission are welcome side effects, never the goal:
-a tiny fax that arrives unreadable is a failure. When a trade-off is forced,
-choose what stays readable on the receiving machine.
+**Legibility is the entire objective.** A fax exists to be *read on the other
+end*, often after surviving a low-resolution, 1-bit, lossy-by-design Group-3
+transmission over a noisy phone line. So this skill is built to **maximize
+document quality and enhance reception/readability** — keep text crisp, small
+fonts and signatures intact, and photos recognizable — *first*. Smaller files
+and faster transmission are welcome side effects, never the goal: a tiny fax
+that arrives unreadable is a failure. When a trade-off is forced, choose what
+stays readable on the receiving machine.
 
-## Step 0 — Pick the mode
+> **Just need to shrink a PDF for email or the web?** That's a different job
+> with the opposite trade-offs — use the companion skill instead:
+> [pdf-email-optimizer](https://github.com/petehottelet/pdf-email-optimizer).
 
-| Signal from the user | Mode | What "good" means |
-|---|---|---|
-| "too big to email", "shrink", "compress", "target N MB", "web view" | **size** | Smallest file that stays visually faithful, in color/grayscale |
-| "fax", "faxable", "bilevel", "black & white for the fax", "comes out garbled/muddy", "send to the clinic's fax" | **fax** | A 1-bit, fax-native PDF (or TIFF) that **arrives readable** on the receiving machine — maximum legibility first; small size and speed are secondary |
-
-If genuinely ambiguous, ask one question. Don't guess between size and fax —
-they produce very different artifacts.
-
-Then verify the environment once:
+Verify the environment once:
 
 ```bash
-python3 scripts/check_deps.py        # installs missing pip deps, reports qpdf/gs
+python3 scripts/check_deps.py        # installs missing pip deps
 ```
 
-## Mode: size
+## How it works
 
-Goal: reduce bytes while the document still reads as a normal color/gray PDF.
-Full procedure and tuning knobs are in `references/general-optimization.md`.
-The short version:
-
-```bash
-python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf --mode size \
-    --target-dpi 150 --jpeg-quality 75 --linearize
-```
-
-The script downsamples over-resolution images, re-encodes them, runs qpdf for
-lossless structural/stream optimization and linearization, and reports the
-before/after size. Read `references/general-optimization.md` before changing
-defaults — especially the guidance on *when not to recompress* (already-small
-images, vector-heavy or text-only PDFs, and the lossless `--mode size-lossless`
-path that only runs qpdf).
-
-## Mode: fax
-
-This is the substantive part of the skill, and the part most tools get wrong.
-**Read `references/fax-optimization.md` before running fax mode** — it explains
-the constraints below and why each knob exists. Do not skip it; the defaults
-only make sense once you understand the Group-3 transmission model.
+**Read `references/fax-optimization.md` before running** — it explains the
+constraints below and why each knob exists. Do not skip it; the defaults only
+make sense once you understand the Group-3 transmission model.
 
 The goal of every choice here is **a document that arrives readable.** Each knob
 exists to protect legibility against a lossy channel — keeping edges sharp,
@@ -86,7 +60,7 @@ density**.
 Run it:
 
 ```bash
-python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf --mode fax \
+python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf \
     --fax-resolution fine --dither auto --report OUTPUT.report.json
 ```
 
@@ -151,7 +125,7 @@ Algorithms can rank compression objectively, but **only a human eye can judge
 real, encoded output:
 
 ```bash
-python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf --mode fax \
+python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf \
     --fax-resolution fine --compare-page 1 --report OUTPUT.report.json
 ```
 
@@ -180,9 +154,9 @@ Instead of flags, pass `--config config.json`. Schema and an annotated example:
 
 ## Output
 
-Always finish by telling the user the output path(s), the before/after size (or
-for fax, total pages + estimated transmission time), and any warnings the report
-flagged. For fax jobs, **legibility is the acceptance test**:
+Always finish by telling the user the output path(s), the total pages +
+estimated transmission time, and any warnings the report flagged. **Legibility
+is the acceptance test**:
 
 - For a single rendering, offer a **preview** of the actual bilevel output
   (`--preview-page N` writes a PNG of exactly what will be transmitted).
@@ -199,7 +173,5 @@ or a different `--dither`) rather than shipping an unreadable fax.
 
 - `references/fax-optimization.md` — the fax constraint model, resolutions,
   dithering theory, MRC segmentation, legibility defense, transmission
-  economics. **Read before running fax mode.**
-- `references/general-optimization.md` — size-reduction procedure, when to
-  recompress vs. leave alone, lossless path.
+  economics. **Read before running.**
 - `references/config-schema.md` — full JSON config schema + annotated example.

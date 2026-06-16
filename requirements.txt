@@ -1,9 +1,8 @@
-# Python dependencies for the pdf-optimizer skill.
+# Python dependencies for the pdf-optimizer (fax) skill.
 # Install with:  pip install -r requirements.txt
 #
-# The qpdf CLI is also required (for lossless structural optimization and
-# linearization) and Ghostscript is optional. Install those with your system
-# package manager — see README.md.
+# No CLI tools are required — fax output is embedded losslessly via img2pdf.
+# (qpdf / Ghostscript are optional and only useful for unrelated PDF work.)
 
 PyMuPDF>=1.24        # fitz: rasterize pages, enumerate embedded images
 Pillow>=10.0         # threshold/dither + CCITT-G4 TIFF I/O

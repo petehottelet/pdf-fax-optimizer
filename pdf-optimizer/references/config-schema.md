@@ -8,17 +8,6 @@ omitted keys fall back to the documented defaults.
 
 ```jsonc
 {
-  "mode": "fax",                  // "size" | "size-lossless" | "fax"
-
-  // ---- size mode ----
-  "size": {
-    "target_dpi": 150,            // downsample images above this effective dpi
-    "jpeg_quality": 75,           // 0-100; photos re-encoded as JPEG
-    "linearize": true,            // enable Fast Web View
-    "skip_below_dpi": true        // don't re-encode images already <= target_dpi
-  },
-
-  // ---- fax mode ----
   "fax": {
     "resolution": "fine",         // "standard" | "fine" | "superfine"
     "dither": "auto",             // "auto" | "clustered" | "blue-noise"
@@ -50,7 +39,6 @@ omitted keys fall back to the documented defaults.
 
 ```jsonc
 {
-  "mode": "fax",
   "fax": {
     "resolution": "superfine",    // small print on intake forms needs the dpi
     "dither": "atkinson",         // one embedded photo, want detail, line is clean
@@ -76,6 +64,7 @@ The `report` file (and `--report`) is written as JSON:
   "mode": "fax",
   "input": "intake.pdf",
   "output": "intake.fax.pdf",
+  // (input_bytes/output_bytes are absolute file sizes, not a compression goal)
   "input_bytes": 4210233,
   "output_bytes": 188440,
   "pages": [
