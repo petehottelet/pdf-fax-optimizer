@@ -78,8 +78,6 @@ python pdf-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
 # -> writes output.fax.compare_p1.png (a side-by-side of all 5 methods)
 ```
 
-![Example halftone comparison contact sheet](docs/compare_example.png)
-
 ## Repository layout
 
 ```
