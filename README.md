@@ -164,7 +164,7 @@ human can actually read.
   <img src="docs/compare_example.png" alt="Six-panel fax comparison showing original color, true grayscale, and four fax halftone treatments" width="100%">
 </p>
 
-## Input formats — fax a Word, PowerPoint, Excel, or image file
+## Input formats — fax a PDF, or a Word, PowerPoint, Excel, or image file
 
 You don't have to start from a PDF. Point the optimizer at common office and
 image formats and it normalizes them to PDF first, then runs the exact same
