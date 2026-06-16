@@ -1,19 +1,22 @@
 ---
-name: pdf-optimizer
+name: pdf-fax-optimizer
 description: >-
-  Maximize document quality and readability when sending a PDF over a fax
-  network — make it arrive LEGIBLE after a noisy, 1-bit Group-3 transmission (a
-  fax's whole job is to be read). Use to make a PDF faxable, convert it to
-  black-and-white/bilevel for the fax, fix a fax that comes out muddy, garbled,
-  or unreadable, keep small text and signatures readable over fax, or halftone
-  photos for fax. Triggers: "prep these scans to fax", "why is my fax unreadable".
+  Maximize document quality and readability when faxing a PDF, Word, PowerPoint,
+  Excel, or image file — make it arrive LEGIBLE after a noisy 1-bit Group-3
+  transmission (a fax's whole job is to be read), then optionally transmit it via
+  a cloud fax API. Use to make a document faxable, convert it to bilevel, fix a
+  muddy or unreadable fax, keep small text and signatures readable, halftone
+  photos, or send a fax. Triggers: "fax this Word doc", "prep these scans to
+  fax", "send this as a fax".
 compatibility: >-
   Requires Python 3 with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
-  img2pdf. No CLI tools are required (qpdf/Ghostscript are optional). Run
-  scripts/check_deps.py first; it installs the pip packages if missing.
+  img2pdf. Sending a fax additionally needs the requests package; faxing
+  Office/OpenDocument files (Word/PowerPoint/Excel) needs LibreOffice (headless).
+  No CLI tools are required for PDF/image input. Run scripts/check_deps.py first;
+  it installs the pip packages if missing.
 ---
 
-# PDF Fax Optimizer
+# PDF FAX
 
 This skill converts a PDF into a **fax-ready** file and, above all, one that
 **arrives LEGIBLE** on the receiving machine.
@@ -64,58 +67,97 @@ python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf \
     --fax-resolution fine --dither auto --report OUTPUT.report.json
 ```
 
+### Input: PDF, Office, or image
+
+`INPUT` doesn't have to be a PDF. The optimizer normalizes other formats to PDF
+first (via `scripts/to_pdf.py`), then runs the identical pipeline:
+
+- **PDF** — used directly.
+- **Images** (`.png/.jpg/.tif/.bmp/.gif/.webp`) — wrapped to PDF with `img2pdf`
+  (no extra tools).
+- **Office / OpenDocument / text** (`.doc/.docx/.rtf/.odt/.txt`, `.ppt/.pptx/.odp`,
+  `.xls/.xlsx/.ods/.csv`) — rendered to PDF by **LibreOffice headless**
+  (`soffice`). If LibreOffice isn't installed the skill says so; install it (no
+  GUI needed) or have the user export to PDF. `--keep-converted-pdf` keeps the
+  intermediate PDF beside the output.
+
+```bash
+python3 scripts/optimize_pdf.py proposal.docx -o proposal.fax.pdf \
+    --fax-resolution fine --dither auto          # Word in, faxable PDF out
+```
+
 What the pipeline does, per page (details in the reference):
 
 1. **Rasterize at a fax-native resolution**, honoring the anisotropic DPI
    (`standard` 204×98, `fine` 204×196, `superfine` 204×391) and clamping the
    scanline to 1728 px. Square resampling distorts the page — the pipeline
    resamples horizontal and vertical axes independently.
-2. **Segment content (MRC-lite).** Text and line art are routed to a hard
-   threshold and kept crisp; photos / continuous-tone regions are routed to a
+2. **Segment content (MRC-lite).** Text and line art are routed to an *adaptive
+   binarizer* and kept crisp; photos / continuous-tone regions are routed to a
    halftone. *Never dither text* — it destroys edge sharpness and legibility.
    Region detection uses the PDF's own embedded-image rectangles, not guesswork.
 3. **Pre-clean:** flatten near-white backgrounds to pure white (so faint content
    survives thresholding), despeckle isolated black pixels, and deskew.
-4. **Halftone the photo regions** with the chosen algorithm. `--dither auto`
+4. **Binarize the text/line content** with `--text-binarize` (default `sauvola`,
+   a document-imaging adaptive threshold that holds up over dark header bars,
+   reverse type, and uneven illumination far better than a single global cut;
+   `niblack`/`wolf`/`bradley`/`otsu` also available).
+5. **Halftone the photo regions** with the chosen schema. Photos first get
+   *dot-gain pre-correction* (`--tone-curve auto`, so midtones don't plug to a
+   black silhouette) and optional edge sharpening (`--sharpen`). `--dither auto`
    picks per the fidelity/compression trade-off; override with any of the
-   methods in *Halftone methods* below.
-5. **Defend legibility:** optionally thicken hairline strokes and sub-minimum
+   schemas in *Halftone schemas* below.
+6. **Defend legibility:** optionally thicken hairline strokes and sub-minimum
    fonts that would vanish at low DPI; warn on inverted (white-on-black) regions
    that balloon transmission time.
-6. **Emit CCITT G4** inside the PDF (default) or as a Class-F multipage TIFF
+7. **Emit CCITT G4** inside the PDF (default) or as a Class-F multipage TIFF
    (`--format tiff`) for a fax-ready file — losslessly, via img2pdf, never
    re-encoded.
-7. **Report** estimated transmission seconds per page (from the actual G4-encoded
+8. **Report** estimated transmission seconds per page (from the actual G4-encoded
    size), total pages, and any legibility/inversion warnings, so the result is
    inspectable *before* someone faxes something unreadable.
 
-### Halftone methods (the top 5)
+The mindset is **optimize the document for the channel**, not "make it look like
+a fax": keep text vector-crisp, render photos so they stay recognizable, and
+spend bits where they buy legibility. The halftone/binarization *schema* is the
+control surface for that — pick it deliberately.
+
+### Halftone schemas (the curated 6-up)
 
 A continuous-tone photo can't exist in 1-bit fax; it must be *simulated* with
-patterns of black dots. The method chosen is the single biggest lever on how a
+patterns of black dots. The schema chosen is the single biggest lever on how a
 photo reads after transmission, and each sits at a different point on the
 **fidelity ↔ transition-density** curve (transitions = compression cost = line
-fragility). The skill ships five, spanning the design space (full theory in
-`references/fax-optimization.md`):
+fragility). The skill ships six front-line schemas spanning the design space
+(full theory in `references/fax-optimization.md`):
 
 1. **`clustered`** — clustered-dot AM screening (newsprint). Dots grow in
    clusters → long runs → **best G4 compression and most robust over a noisy
    line**; lowest apparent resolution. The default for `--fax-heavy`.
-2. **`blue-noise`** — void-and-cluster FM screening. Isotropic, organic stipple
+2. **`green-noise`** — hybrid AM–FM screening. Mid-size dot clusters give
+   **blue-noise detail with clustered-dot run-length and robustness**; tune with
+   `--green-noise-coarseness` (~2 detail … 8 robust). The `auto` pick for a
+   moderate photo that must survive a real line.
+3. **`blue-noise`** — void-and-cluster FM screening. Isotropic, organic stipple
    with **no directional "worms"**; excellent perceived detail, middling
    compression.
-3. **`atkinson`** — Atkinson error diffusion. Clean whites and crisp thin
+4. **`atkinson`** — Atkinson error diffusion. Clean whites and crisp thin
    features; good detail, looser compression than screening.
-4. **`floyd`** — Floyd–Steinberg error diffusion. The classic; **maximum
+5. **`floyd`** — Floyd–Steinberg error diffusion. The classic; **maximum
    detail**, but its dispersed speckle is the **worst case for G4 size** and the
    most fragile over a bad line.
-5. **`ordered`** — Bayer ordered dithering. Fast and predictable crosshatch;
-   middling on both detail and compression.
+6. **`line`** (aliases `woodcut`/`engraving`) — horizontal line screen. Tone
+   becomes horizontal stripes that **thicken with darkness**; because the strokes
+   run *along the scanline* it produces almost entirely long runs → **G4 size and
+   robustness on par with `clustered`**, while reading as a crisp, high-contrast
+   engraving rather than mud. Great when a line is bad and the photo just has to
+   stay recognizable.
 
-(Also selectable: `jarvis`, `stucki`, `sierra` heavier error-diffusion kernels,
-and `none` = hard threshold for pure text / line art / barcodes.) Always match
-the screen to the fax resolution, or the halftone collapses to mud when the
-receiver re-thresholds — the pipeline scales the clustered cell from the dpi.
+(Also selectable: `ordered` Bayer; `edd` edge-enhancing error diffusion for text
+over a photographic background; `jarvis`/`stucki`/`sierra` heavier kernels; and
+`none` = hard threshold for pure text / line art / barcodes.) All screen schemas
+are **anisotropically tuned** from the fax DPI so dots stay round on paper and
+the screen doesn't collapse to mud when the receiver re-thresholds.
 
 ### Maximally productive preview — let the user spend their *eye tokens*
 
@@ -129,9 +171,10 @@ python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf \
     --fax-resolution fine --compare-page 1 --report OUTPUT.report.json
 ```
 
-`--compare-page N` renders that page through all five halftone methods into one
-labeled PNG (`OUTPUT.compare_pN.png`), each panel annotated with its **actual
-G4 size and estimated transmission time**, and the **OPTIMAL pick highlighted**.
+`--compare-page N` renders that page through the curated 6-up of halftone methods
+into one labeled PNG (`OUTPUT.compare_pN.png`), each panel annotated with its
+**actual G4 size and estimated transmission time**, and the **OPTIMAL pick
+highlighted**.
 The skill therefore does both jobs the user asked for: (a) it **suggests the
 optimal** method from the page's content (photo fraction, fax-heavy, line
 condition), and (b) it lets the user **choose the optimal** by eye from the
@@ -169,9 +212,41 @@ If anything is borderline — small text, faint signatures, muddy photos —
 recommend the knob that recovers it (`--thicken`, a higher `--fax-resolution`,
 or a different `--dither`) rather than shipping an unreadable fax.
 
+## Send it (optional)
+
+The skill can also **transmit** the optimized file through a cloud fax API — no
+machine, modem, or phone line, just an API key and the recipient number in
+**E.164** (e.g. `+14155551234`). Built-in providers: `mfax` (mFax/Documo, the
+default), `phaxio` (Phaxio/Sinch), and `generic` (any upload API — Telnyx, SRFax,
+etc.). Full details and per-provider request shapes: `references/sending.md`.
+
+Optimize and send in one step (always pass keys via env, and **`--dry-run` first**
+to confirm the request before transmitting):
+
+```bash
+export MFAX_API_KEY=sk_live_xxx
+python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.fax.pdf \
+    --fax-resolution fine --dither auto \
+    --send mfax --to +14155551234 --dry-run     # drop --dry-run to transmit
+```
+
+Or send an already-optimized file directly:
+
+```bash
+python3 scripts/send_fax.py OUTPUT.fax.pdf --provider mfax --to +14155551234
+```
+
+Rules: **never** put an API key on the command line (use the provider's env var);
+confirm the recipient number with the user before a real send; show the user the
+`--dry-run` request and the legibility check (preview/report) before transmitting;
+and remember a submit response means *queued*, not *delivered* — point the user
+to the provider's status webhook/endpoint to confirm receipt.
+
 ## Reference files
 
 - `references/fax-optimization.md` — the fax constraint model, resolutions,
   dithering theory, MRC segmentation, legibility defense, transmission
   economics. **Read before running.**
 - `references/config-schema.md` — full JSON config schema + annotated example.
+- `references/sending.md` — transmit via a cloud fax API (mFax, Phaxio,
+  generic): endpoints, auth, env vars, and one-step optimize-and-send.

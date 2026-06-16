@@ -1,4 +1,4 @@
-# Python dependencies for the pdf-optimizer (fax) skill.
+# Python dependencies for the pdf-fax-optimizer skill.
 # Install with:  pip install -r requirements.txt
 #
 # No CLI tools are required — fax output is embedded losslessly via img2pdf.
@@ -9,3 +9,6 @@ Pillow>=10.0         # threshold/dither + CCITT-G4 TIFF I/O
 numpy>=1.26          # array math for halftoning / pre-cleaning
 opencv-python-headless>=4.9  # morphology, deskew, segmentation
 img2pdf>=0.5         # embed the G4 TIFF into a PDF without re-encoding
+
+# Optional — only needed to TRANSMIT via a cloud fax API (scripts/send_fax.py)
+requests>=2.31       # POST the optimized file to mFax / Phaxio / generic

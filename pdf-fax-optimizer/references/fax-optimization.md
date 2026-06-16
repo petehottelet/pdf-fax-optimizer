@@ -73,35 +73,67 @@ means worse G4 compression, longer transmission, and more line-noise fragility.
 
 ### The top 5 (what the skill ships)
 
-| Method (`--dither`) | Family | Detail | G4 size | Noise robustness |
+| Schema (`--dither`) | Family | Detail | G4 size | Noise robustness |
 |---|---|---|---|---|
 | `clustered` | AM screening (clustered-dot) | low–med | **best** | **best** |
+| `green-noise` | hybrid AM–FM (clustered FM) | med–high | good | good |
 | `blue-noise` | FM screening (void-and-cluster) | **high** | medium | medium |
 | `atkinson` | error diffusion (6/8) | high | med | low–med |
 | `floyd` | error diffusion | **highest** | **worst** | **worst** |
-| `ordered` | ordered (Bayer) | medium | medium | medium |
+| `line` (`woodcut`) | horizontal line screen (AM, 1-D) | med | **best** | **best** |
 
 - **Clustered-dot (AM) screening** — like newsprint. Dots grow in clusters, so
   runs are long and compression is far better; it survives transmission and
   re-thresholding best. The cost is lower apparent resolution. `--fax-heavy`
   selects it.
+- **Green noise (hybrid AM–FM)** — the best single addition for a marginal
+  channel. Built by running void-and-cluster with a *larger* Gaussian sigma so
+  the minority pixels coalesce into mid-size clusters: it keeps blue-noise-level
+  detail but produces the longer runs and bit-flip tolerance of a clustered
+  screen. `--green-noise-coarseness` (~2 → near blue/detail, ~8 → near
+  clustered/robust) is the AM↔FM knob. Cached per coarseness in `assets/`.
 - **Blue noise (void-and-cluster, FM screening)** — Ulichney's method builds an
   isotropic threshold matrix with energy concentrated at high frequencies. The
   result is an organic stipple with **no directional "worms"** and no clustered
   low-frequency blotches, so it looks clean to the eye and re-thresholds
   gracefully. Compression and robustness land between screening and error
-  diffusion. (The pipeline caches a 64×64 tile in `assets/bluenoise_64.npy`,
-  generated numpy-only — no scipy.)
+  diffusion.
 - **Error diffusion** — Floyd-Steinberg, Atkinson (and the heavier `jarvis`,
-  `stucki`, `sierra` kernels, selectable but not in the headline 5). Best
-  *perceived* detail because quantization error is pushed to neighbors,
-  preserving local average tone. But it produces **dispersed, high-frequency
-  speckle** — the worst case for run-length compression and the most fragile
-  over a noisy line. Atkinson diffuses only 6/8 of the error, giving cleaner
-  whites, better thin-feature survival, and slightly better runs than
-  Floyd-Steinberg. The pipeline scans serpentine to break up directional worms.
+  `stucki`, `sierra` kernels, plus `edd` below). Best *perceived* detail because
+  quantization error is pushed to neighbors, preserving local average tone. But
+  it produces **dispersed, high-frequency speckle** — the worst case for
+  run-length compression and the most fragile over a noisy line. Atkinson
+  diffuses only 6/8 of the error, giving cleaner whites, better thin-feature
+  survival, and slightly better runs than Floyd-Steinberg. The pipeline scans
+  serpentine to break up directional worms.
+- **`edd` — edge-enhancing error diffusion** (Eschbach): a high-pass term is
+  added before diffusion, so glyph/edge structure is sharpened while surrounding
+  tone still diffuses. Use it for the gray zone where text sits over a
+  photographic background and a hard binarizer would eat either the text or the
+  texture.
+- **`line` / `woodcut` — horizontal line screen** — a 1-D AM screen: tone is
+  rendered as horizontal stripes whose thickness grows with darkness (a
+  triangular threshold profile across each vertical period keeps a hairline in
+  highlights and fills toward solid in shadows). Because every stroke runs
+  *along the scanline*, the output is almost entirely long horizontal runs, so
+  G4 size and bit-flip robustness match `clustered` — while the result reads as a
+  clean, high-contrast engraving instead of mud. The pitch follows the vertical
+  DPI. Ideal when the line is bad and the photo only needs to stay recognizable.
 - **Ordered / Bayer (dispersed)** — cheap threshold-map method; between the
   others on both axes. Predictable, fast, no error propagation.
+
+**Anisotropic tuning.** Fax pixels are non-square (standard 2:1, fine 1:1,
+superfine ~1:2). Every screen schema (`clustered`, `ordered`, `blue-noise`,
+`green-noise`) resamples its threshold tile to the device aspect derived from
+`--fax-resolution` so a dot is round *on paper* and runs aren't distorted. No
+flag — it follows the resolution.
+
+**Dot-gain pre-correction (`--tone-curve auto`).** A 1-bit channel has large
+effective dot gain; without correction, midtones plug to solid black and a photo
+arrives as a silhouette — often a bigger win than the dither choice itself. The
+pipeline applies a per-family tone curve to the photo region before halftoning
+(screens are corrected more than error diffusion). `--sharpen` additionally
+unsharp-masks the photo to counter the channel's MTF rolloff.
 
 Decision guide (`recommend_dither`):
 
@@ -109,8 +141,9 @@ Decision guide (`recommend_dither`):
   and smallest; halftoning would only add noise.
 - Photo area > 45% or `--fax-heavy` → **clustered**: keep runs long so it
   compresses and survives a noisy line.
-- Otherwise → **atkinson**: detail and clean whites without Floyd/Jarvis bloat,
-  with `blue-noise` the close runner-up for a softer, isotropic look.
+- Otherwise → **green-noise**: blue-noise-level detail but clustered into longer,
+  more bit-flip-tolerant runs; drop to `atkinson` for the crispest whites on a
+  clean line, or `blue-noise` for a softer isotropic look.
 
 `--dither auto` applies exactly this logic. But the recommendation is only a
 starting point — see *Spend your eye tokens* below.
@@ -138,7 +171,21 @@ The single biggest quality win is *not treating the whole page the same.* This
 is the idea behind Mixed Raster Content (MRC): classify regions, then route each
 to the right converter.
 
-- **Text & line art** → hard threshold (Otsu or adaptive), kept crisp.
+- **Text & line art** → adaptive binarization (`--text-binarize`, default
+  `sauvola`), kept crisp. Sauvola/Niblack/Wolf/Bradley compute a *per-pixel*
+  threshold from the local mean and standard deviation (via integral images, so
+  O(1)/pixel and no contrib dependency), which holds text together over dark
+  header bars, reverse (white-on-black) type, and uneven scanner illumination
+  where a single global Otsu cut drops glyphs or fills shadows. `otsu` remains
+  available as the global fallback.
+  - **Solid fills & reverse type** are carried across as *solid* black. Adaptive
+    binarizers otherwise misfire on a large dark fill (e.g. a reverse-type header
+    bar): inside the fill the local-contrast term pushes the threshold below the
+    fill level, so the fill flips to white and only the glyph edges survive as a
+    hollow stroke. Where the local mean is dark (a filled region — the mean rides
+    out rasterization noise that a flat-variance test trips on) the area is kept
+    solid black, and only genuinely bright pixels (knockout/reverse text) stay
+    white. Body text on a white page is untouched: its local mean stays light.
   **Never dither text** — dithering destroys edge sharpness and legibility, and
   explodes transition density on exactly the content people most need to read.
 - **Photos / continuous-tone** → halftone per §3.
@@ -210,9 +257,13 @@ The output should be cheap and robust to send, not just small on disk:
 | Flag | Default | Why it exists |
 |---|---|---|
 | `--fax-resolution` | `fine` | Native dpi; anisotropic, avoids moiré |
-| `--dither` | `auto` | Fidelity vs. transition-density trade-off (§3); one of clustered, blue-noise, atkinson, floyd, ordered, jarvis, stucki, sierra, none |
-| `--compare-page` | none | Render all top-5 methods to one contact sheet so a human can pick by eye (§3) |
-| `--compare-methods` | top 5 | Override which halftones appear in the comparison |
+| `--dither` | `auto` | Photo halftone schema (§3); clustered, green-noise, blue-noise, atkinson, floyd, line/woodcut, ordered, edd, jarvis, stucki, sierra, none |
+| `--green-noise-coarseness` | `4.0` | AM↔FM knob for green-noise (~2 detail … 8 robust) (§3) |
+| `--text-binarize` | `sauvola` | Adaptive binarizer for text/line content; niblack, wolf, bradley, otsu (§4) |
+| `--tone-curve` | `auto` | Per-family dot-gain pre-correction so photos don't plug to black (§3) |
+| `--sharpen` | off | Edge-aware unsharp on photo regions before halftoning (§3) |
+| `--compare-page` | none | Render all top-5 schemas to one contact sheet so a human can pick by eye (§3) |
+| `--compare-methods` | top 5 | Override which schemas appear in the comparison |
 | `--fax-heavy` | off | Bias to clustered: compresses + survives noisy lines |
 | `--segmentation` | `embedded` | MRC routing; `variance` for flattened scans |
 | `--thicken` | off | Save hairlines/small fonts from vanishing (§5) |
@@ -235,7 +286,13 @@ The output should be cheap and robust to send, not just small on disk:
   flatten, despeckle (morphology), deskew (min-area-rect / projection), and
   thicken (dilation).
 - **img2pdf** embeds the G4 TIFF into a PDF *without re-encoding* (the PDF carries
-  a `CCITTFaxDecode` filter). No CLI tools are required.
+  a `CCITTFaxDecode` filter). No CLI tools are required. It also wraps loose
+  **image** input into a one-page PDF at the front of the pipeline.
+- **Input normalization (`scripts/to_pdf.py`)** turns non-PDF input into PDF
+  before anything else: images via img2pdf; **Word/PowerPoint/Excel/OpenDocument/
+  text** via **LibreOffice headless** (`soffice --headless --convert-to pdf`).
+  LibreOffice is optional and only needed for those office formats; everything
+  downstream is unchanged because it always sees a PDF.
 - **Leptonica** (not installed here) is the production-grade choice for
   bilevel/MRC/despeckle if you move this off the current box; Ghostscript's
   `tiffg4` device + `-r204x196` is an alternative rasterizer when available.

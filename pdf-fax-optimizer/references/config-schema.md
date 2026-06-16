@@ -10,10 +10,21 @@ omitted keys fall back to the documented defaults.
 {
   "fax": {
     "resolution": "fine",         // "standard" | "fine" | "superfine"
-    "dither": "auto",             // "auto" | "clustered" | "blue-noise"
-                                  //   | "atkinson" | "floyd" | "ordered"
-                                  //   | "jarvis" | "stucki" | "sierra" | "none"
+
+    // ---- photo halftone schema (continuous-tone regions only) ----
+    "dither": "auto",             // "auto" | "clustered" | "green-noise"
+                                  //   | "blue-noise" | "atkinson" | "floyd"
+                                  //   | "line" (aka "woodcut"/"engraving")
+                                  //   | "ordered" | "edd" | "jarvis" | "stucki"
+                                  //   | "sierra" | "none"
+    "green_noise_coarseness": 4.0, // green-noise AM<->FM knob ~2 (detail)..8 (robust)
+    "tone_curve": "auto",         // per-family dot-gain pre-correction | "none"
+    "sharpen": false,             // edge-aware unsharp on photos before halftoning
     "fax_heavy": false,           // bias toward clustered (compresses, robust)
+
+    // ---- text / line-art binarization (never halftoned) ----
+    "text_binarize": "sauvola",   // "sauvola" | "niblack" | "wolf" | "bradley"
+                                  //   | "otsu" (adaptive document binarizers)
     "segmentation": "embedded",   // "embedded" (use PDF image rects)
                                   //   | "variance" (heuristic for flat scans)
                                   //   | "none" (whole page one strategy)
@@ -74,7 +85,8 @@ The `report` file (and `--report`) is written as JSON:
       "est_transmission_s": 35.5,
       "photo_regions": 1,
       "photo_fraction": 0.19,
-      "dither": "atkinson",
+      "dither": "green-noise",
+      "text_binarize": "sauvola",
       "already_bilevel": false,
       "warnings": ["small_text_below_min", "wash_out_color:yellow"]
     }
