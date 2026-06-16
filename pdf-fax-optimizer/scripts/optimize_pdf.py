@@ -43,6 +43,11 @@ def build_fax_options(cfg, args) -> fax.FaxOptions:
         deskew=pick(args.deskew, "deskew", True),
         fmt=pick(args.format, "format", "pdf"),
         line_rate_bps=pick(args.line_rate, "line_rate_bps", 14400),
+        text_binarize=pick(args.text_binarize, "text_binarize", "sauvola"),
+        tone_curve=pick(args.tone_curve, "tone_curve", "auto"),
+        sharpen=args.sharpen or fc.get("sharpen", False),
+        green_noise_coarseness=pick(args.green_noise_coarseness,
+                                    "green_noise_coarseness", 4.0),
     )
 
 
@@ -60,7 +65,20 @@ def main():
     p.add_argument("--dither",
                    choices=["auto", "none", "threshold", "ordered", "bayer",
                             "clustered", "floyd", "atkinson", "jarvis", "stucki",
-                            "sierra", "blue-noise"], default=None)
+                            "sierra", "blue-noise", "green-noise", "green",
+                            "edd", "line", "woodcut", "engraving"], default=None,
+                   help="photo halftone schema (see references)")
+    p.add_argument("--green-noise-coarseness", type=float, default=None,
+                   dest="green_noise_coarseness",
+                   help="green-noise AM<->FM knob ~2 (detail) .. 8 (robust)")
+    p.add_argument("--text-binarize",
+                   choices=["sauvola", "niblack", "wolf", "bradley", "otsu"],
+                   default=None,
+                   help="adaptive binarizer for text/line content (default sauvola)")
+    p.add_argument("--tone-curve", choices=["auto", "none"], default=None,
+                   help="per-family dot-gain pre-correction for photos")
+    p.add_argument("--sharpen", action="store_true",
+                   help="edge-aware unsharp on photo regions before halftoning")
     p.add_argument("--fax-heavy", action="store_true")
     p.add_argument("--segmentation",
                    choices=["embedded", "variance", "none"], default=None)
@@ -79,11 +97,48 @@ def main():
                         "one labeled contact sheet so you can pick by eye")
     p.add_argument("--compare-methods", default=None,
                    help="comma-separated halftone names for --compare-page "
-                        "(default: the curated top 5)")
+                        "(default: the curated 6-up set)")
+    p.add_argument("--keep-converted-pdf", action="store_true",
+                   help="when input is Office/image, keep the intermediate PDF "
+                        "next to the output instead of deleting it")
+    # ---- optional: send the optimized file via a cloud fax API ----
+    s = p.add_argument_group("sending (optional)")
+    s.add_argument("--send", choices=["mfax", "phaxio", "generic"], default=None,
+                   help="after optimizing, transmit the output via this fax API")
+    s.add_argument("--to", help="recipient fax number in E.164 (with --send)")
+    s.add_argument("--api-key")
+    s.add_argument("--api-secret")
+    s.add_argument("--base-url")
+    s.add_argument("--dry-run", action="store_true",
+                   help="with --send: print the request instead of transmitting")
+    s.add_argument("--cover-page", action="store_true")
+    s.add_argument("--recipient-name")
+    s.add_argument("--subject")
+    s.add_argument("--notes")
+    s.add_argument("--caller-id")
+    s.add_argument("--url")
+    s.add_argument("--auth-header")
+    s.add_argument("--basic-user")
+    s.add_argument("--basic-pass")
+    s.add_argument("--to-field", default="to")
+    s.add_argument("--file-field", default="file")
+    s.add_argument("--field", action="append")
     args = p.parse_args()
 
     cfg = load_config(args.config)
     opt = build_fax_options(cfg, args)
+
+    # Accept Word/PowerPoint/Excel/OpenDocument/text and loose images by
+    # normalizing them to PDF first; the rest of the pipeline is unchanged.
+    import to_pdf
+    keep_dir = os.path.dirname(os.path.abspath(args.output)) \
+        if args.keep_converted_pdf else None
+    try:
+        src_pdf, converted_is_temp = to_pdf.ensure_pdf(args.input, keep_dir)
+    except RuntimeError as e:
+        sys.exit(str(e))
+    if src_pdf != args.input:
+        print(f"converted {args.input} -> {src_pdf}")
 
     comparison = None
     if args.compare_page:
@@ -92,7 +147,7 @@ def main():
         png = (os.path.splitext(args.output)[0]
                + f".compare_p{args.compare_page}.png")
         comparison = fax.render_comparison(
-            args.input, args.compare_page, png, opt, methods)
+            src_pdf, args.compare_page, png, opt, methods)
         print(f"Comparison contact sheet: {png}")
         print(f"  recommended: {comparison['recommended']}  "
               f"(smallest: {comparison['smallest']})")
@@ -105,12 +160,24 @@ def main():
 
     if args.preview_page:
         png = os.path.splitext(args.output)[0] + f".preview_p{args.preview_page}.png"
-        fax.render_preview(args.input, args.preview_page, png, opt)
+        fax.render_preview(src_pdf, args.preview_page, png, opt)
         print(f"Preview written: {png}")
 
-    report = fax.convert_pdf(args.input, args.output, opt)
+    report = fax.convert_pdf(src_pdf, args.output, opt)
+    # Report against the original file the user handed us, not the intermediate.
+    report["input"] = args.input
+    report["input_bytes"] = os.path.getsize(args.input)
+    if src_pdf != args.input:
+        report["converted_pdf"] = src_pdf
     if comparison:
         report["comparison"] = comparison
+
+    if converted_is_temp and src_pdf != args.input:
+        try:
+            import shutil
+            shutil.rmtree(os.path.dirname(src_pdf), ignore_errors=True)
+        except Exception:
+            pass
 
     report_path = args.report or cfg.get("report")
     if report_path:
@@ -118,6 +185,17 @@ def main():
             json.dump(report, f, indent=2)
 
     _print_summary(report)
+
+    if args.send:
+        if not args.to:
+            sys.exit("--send requires --to (recipient fax number in E.164)")
+        import send_fax
+        print(f"\nsending {args.output} via {args.send} to {args.to}"
+              + (" (dry run)" if args.dry_run else "") + " ...")
+        result = send_fax.send(args.send, args.output, args.to, args)
+        print(json.dumps(result, indent=2))
+        if not result.get("ok"):
+            sys.exit(1)
 
 
 def _print_summary(report):
@@ -135,6 +213,9 @@ def _print_summary(report):
     dithers = sorted({p.get("dither", "") for p in report["pages"]} - {""})
     if dithers:
         print(f"halftone used: {', '.join(dithers)}")
+    binar = sorted({p.get("text_binarize", "") for p in report["pages"]} - {""})
+    if binar:
+        print(f"text binarizer: {', '.join(binar)}")
     print(f"est. transmission: {report['total_est_transmission_s']:.0f}s "
           f"(~{report['total_est_transmission_s'] / 60:.1f} min)")
     if report.get("comparison"):

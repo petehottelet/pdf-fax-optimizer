@@ -42,7 +42,7 @@ MAX_SCANLINE_PX = 1728
 @dataclass
 class FaxOptions:
     resolution: str = "fine"
-    dither: str = "auto"            # auto|floyd|atkinson|ordered|clustered|none
+    dither: str = "auto"            # photo halftone schema (see HALFTONE_INFO)
     fax_heavy: bool = False
     segmentation: str = "embedded"  # embedded|variance|none
     thicken: bool = False
@@ -54,6 +54,11 @@ class FaxOptions:
     line_rate_bps: int = 14400
     page_overhead_s: float = 1.5
     min_font_px: int = 12           # below this stroke height -> warn / thicken
+    # Document-optimization knobs (halftoning-schemas.md)
+    text_binarize: str = "sauvola"  # sauvola|niblack|wolf|bradley|otsu
+    tone_curve: str = "auto"        # auto|none  (dot-gain pre-correction)
+    sharpen: bool = False           # edge-aware unsharp on photo regions
+    green_noise_coarseness: float = 4.0  # green-noise AM<->FM knob (~2..8)
 
 
 @dataclass
@@ -64,6 +69,7 @@ class PageReport:
     photo_regions: int = 0
     photo_fraction: float = 0.0
     dither: str = ""
+    text_binarize: str = ""
     already_bilevel: bool = False
     warnings: list = field(default_factory=list)
 
@@ -207,6 +213,123 @@ def threshold_otsu(gray: np.ndarray) -> np.ndarray:
     return bw
 
 
+# --- Adaptive text binarization (document-imaging, not dithering) ------------ #
+# These produce crisp 1-bit *text*, holding up under uneven illumination, dark
+# header bars and reverse (white-on-black) type far better than a single global
+# Otsu cut. They run before any halftone so text pixels never reach a screen.
+def _local_mean_std(gray: np.ndarray, r: int):
+    """Windowed mean and std via integral images: O(1) per pixel."""
+    g = gray.astype(np.float64)
+    k = 2 * r + 1
+    ii = cv2.integral(g)                 # (h+1, w+1)
+    ii2 = cv2.integral(g * g)
+    h, w = g.shape
+
+    def _winsum(I):
+        y0 = np.clip(np.arange(h) - r, 0, h)
+        y1 = np.clip(np.arange(h) + r + 1, 0, h)
+        x0 = np.clip(np.arange(w) - r, 0, w)
+        x1 = np.clip(np.arange(w) + r + 1, 0, w)
+        A = I[np.ix_(y0, x0)]; B = I[np.ix_(y0, x1)]
+        C = I[np.ix_(y1, x0)]; D = I[np.ix_(y1, x1)]
+        return D - B - C + A
+
+    cnt = (np.clip(np.arange(h) + r + 1, 0, h) - np.clip(np.arange(h) - r, 0, h))[:, None] * \
+          (np.clip(np.arange(w) + r + 1, 0, w) - np.clip(np.arange(w) - r, 0, w))[None, :]
+    cnt = np.maximum(cnt, 1)
+    mean = _winsum(ii) / cnt
+    var = np.maximum(_winsum(ii2) / cnt - mean * mean, 0.0)
+    return mean, np.sqrt(var)
+
+
+def binarize_text(gray: np.ndarray, method: str, vdpi: int) -> np.ndarray:
+    """Return a 0/255 bilevel image (0=black) for text/line content."""
+    method = (method or "sauvola").lower()
+    if method == "otsu":
+        return threshold_otsu(gray)
+    r = max(8, int(round(vdpi / 12)))    # window ~ half a body-text x-height
+    g = gray.astype(np.float64)
+    mean, std = _local_mean_std(gray, r)
+    if method == "bradley":
+        thr = mean * (1.0 - 0.15)
+    elif method == "niblack":
+        thr = mean - 0.2 * std
+    elif method == "wolf":
+        R = std.max() if std.max() > 1e-6 else 1.0
+        M = float(g.min())
+        thr = mean - 0.5 * (1.0 - std / R) * (mean - M)
+    else:  # sauvola (default)
+        R, k = 128.0, 0.34
+        thr = mean * (1.0 + k * (std / R - 1.0))
+    black = g <= thr
+    black |= _solid_fill_mask(g, mean)
+    return np.where(black, 0, 255).astype(np.uint8)
+
+
+def _solid_fill_mask(g: np.ndarray, mean: np.ndarray,
+                     dark_level: float = 115.0,
+                     bright: float = 160.0) -> np.ndarray:
+    """Carry solid color-fill areas across as solid black.
+
+    Adaptive binarizers (Sauvola/Niblack/...) misfire on large dark fills — e.g.
+    a reverse-type header bar: inside the fill the local contrast term drives the
+    threshold below the fill level, so the fill flips to white and only the glyph
+    edges survive as a stroke. Where the *local mean* is dark (a filled region —
+    using the mean rather than the per-pixel value rides out rasterization noise
+    that a flat-std test trips over), keep the area solid black; only genuinely
+    bright pixels (reverse/knockout text, `g >= bright`) are left white. Body text
+    on a white page is unaffected: its local mean stays light."""
+    return (mean < dark_level) & (g < bright)
+
+
+# --- Photo pre-conditioning (applied before the halftone, photo region only) - #
+# Effective dot gain on a 1-bit channel is large: without correction midtones
+# plug to solid black and a photo arrives as a silhouette. Screens gain more
+# than error diffusion, so the correction is calibrated per family. gamma<1
+# lifts midtones (counteracts the darkening).
+_TONE_GAMMA = {
+    "clustered": 0.62, "ordered": 0.66, "blue-noise": 0.70, "green-noise": 0.66,
+    "floyd": 0.85, "atkinson": 0.82, "jarvis": 0.85, "stucki": 0.85,
+    "sierra": 0.85, "edd": 0.82, "line": 0.90,
+}
+
+
+def apply_tone_curve(gray: np.ndarray, dither_name: str, mode: str) -> np.ndarray:
+    """Per-family dot-gain pre-correction. mode: 'auto' | 'none'."""
+    if mode == "none":
+        return gray
+    gamma = _TONE_GAMMA.get(dither_name)
+    if not gamma:
+        return gray
+    lut = (((np.arange(256) / 255.0) ** gamma) * 255.0).astype(np.uint8)
+    return lut[gray]
+
+
+def pre_sharpen(gray: np.ndarray, vdpi: int, amount: float = 0.7) -> np.ndarray:
+    """Edge-aware unsharp mask to counter the channel's MTF rolloff."""
+    blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=1.0)
+    out = gray.astype(np.float32) + amount * (gray.astype(np.float32)
+                                              - blur.astype(np.float32))
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _aniso_tile(tile: np.ndarray, hdpi: int, vdpi: int) -> np.ndarray:
+    """Resample a screen/threshold tile to the device pixel aspect so a dot is
+    round *on paper* (pixels are non-square: standard 2:1, fine 1:1, superfine
+    ~1:2). Vertical scale = vdpi/hdpi."""
+    scale = vdpi / float(hdpi)
+    th = max(2, int(round(tile.shape[0] * scale)))
+    if th == tile.shape[0]:
+        return tile
+    return cv2.resize(tile, (tile.shape[1], th), interpolation=cv2.INTER_NEAREST)
+
+
+def _tile_to(thr: np.ndarray, shape) -> np.ndarray:
+    th, tw = thr.shape
+    tiled = np.tile(thr, (shape[0] // th + 1, shape[1] // tw + 1))
+    return tiled[:shape[0], :shape[1]]
+
+
 def dither_floyd(gray: np.ndarray) -> np.ndarray:
     """Floyd-Steinberg via Pillow's fast C implementation."""
     return np.asarray(Image.fromarray(gray, "L").convert("1")).astype(np.uint8) * 255
@@ -260,32 +383,34 @@ def dither_atkinson(gray: np.ndarray) -> np.ndarray:
     return error_diffuse(gray, "atkinson")
 
 
-def dither_ordered(gray: np.ndarray, n: int = 8) -> np.ndarray:
-    """Bayer ordered dithering (dispersed-dot)."""
+def dither_ordered(gray: np.ndarray, n: int = 8, hdpi: int = 204,
+                   vdpi: int = 196) -> np.ndarray:
+    """Bayer ordered dithering (dispersed-dot), anisotropy-corrected."""
     base = np.array([[0, 2], [3, 1]], dtype=np.float32)
     m = base
     while m.shape[0] < n:
         m = np.block([[4 * m, 4 * m + 2], [4 * m + 3, 4 * m + 1]])
     m = m[:n, :n]
     thr = (m + 0.5) / (m.size) * 255.0
-    th = m.shape[0]
-    tiled = np.tile(thr, (gray.shape[0] // th + 1, gray.shape[1] // th + 1))
-    tiled = tiled[:gray.shape[0], :gray.shape[1]]
+    thr = _aniso_tile(thr, hdpi, vdpi)
+    tiled = _tile_to(thr, gray.shape)
     return (gray.astype(np.float32) > tiled).astype(np.uint8) * 255
 
 
-def dither_clustered(gray: np.ndarray, cell: int = 6) -> np.ndarray:
+def dither_clustered(gray: np.ndarray, cell: int = 6, hdpi: int = 204,
+                     vdpi: int = 196) -> np.ndarray:
     """Clustered-dot (AM) screening. Dots grow in a cluster, producing long runs
     that compress far better and survive a noisy line. `cell` is scaled from the
-    fax dpi by the caller so the screen doesn't collapse after re-thresholding."""
+    fax dpi by the caller so the screen doesn't collapse after re-thresholding,
+    and the tile is resampled to the device aspect so dots stay round on paper."""
     # spiral-ordered threshold within a cell -> growth from center outward
     yy, xx = np.mgrid[0:cell, 0:cell]
     cx = cy = (cell - 1) / 2.0
     dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
     order = dist.argsort(axis=None).argsort().reshape(cell, cell)
     thr = (order + 0.5) / (cell * cell) * 255.0
-    tiled = np.tile(thr, (gray.shape[0] // cell + 1, gray.shape[1] // cell + 1))
-    tiled = tiled[:gray.shape[0], :gray.shape[1]]
+    thr = _aniso_tile(thr.astype(np.float32), hdpi, vdpi)
+    tiled = _tile_to(thr, gray.shape)
     return (gray.astype(np.float32) > tiled).astype(np.uint8) * 255
 
 
@@ -351,41 +476,121 @@ def generate_blue_noise(shape=(64, 64), sigma=1.9, seed=0, frac=0.1) -> np.ndarr
     return dither
 
 
+# Cache of generated void-and-cluster matrices, keyed by sigma. Blue noise uses
+# a small sigma (isotropic, max detail); larger sigma clumps the minority pixels
+# into mid-size aggregates -> "green noise" (the AM<->FM hybrid of section 1.1).
+_VC_CACHE = {}
+
+
+def _vc_matrix(sigma: float, tag: str) -> np.ndarray:
+    key = round(sigma, 2)
+    if key in _VC_CACHE:
+        return _VC_CACHE[key]
+    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "assets")
+    asset = os.path.join(assets, f"{tag}_64_s{key}.npy")
+    try:
+        m = np.load(asset)
+    except Exception:
+        m = generate_blue_noise((64, 64), sigma=sigma, seed=0)
+        try:
+            os.makedirs(assets, exist_ok=True)
+            np.save(asset, m)
+        except Exception:
+            pass
+    _VC_CACHE[key] = m
+    return m
+
+
 def _blue_noise_matrix() -> np.ndarray:
     global _BLUE_NOISE
     if _BLUE_NOISE is not None:
         return _BLUE_NOISE
-    asset = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                         "..", "assets", "bluenoise_64.npy")
+    legacy = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "assets", "bluenoise_64.npy")
     try:
-        _BLUE_NOISE = np.load(asset)
+        _BLUE_NOISE = np.load(legacy)
     except Exception:
-        _BLUE_NOISE = generate_blue_noise((64, 64), sigma=1.9, seed=0)
-        try:
-            os.makedirs(os.path.dirname(asset), exist_ok=True)
-            np.save(asset, _BLUE_NOISE)
-        except Exception:
-            pass
+        _BLUE_NOISE = _vc_matrix(1.9, "bluenoise")
     return _BLUE_NOISE
 
 
-def dither_blue_noise(gray: np.ndarray) -> np.ndarray:
-    m = _blue_noise_matrix()
+def _screen_from_matrix(gray, m, hdpi, vdpi) -> np.ndarray:
     thr = (m.astype(np.float32) + 0.5) / m.size * 255.0
-    th, tw = m.shape
-    tiled = np.tile(thr, (gray.shape[0] // th + 1, gray.shape[1] // tw + 1))
-    tiled = tiled[:gray.shape[0], :gray.shape[1]]
+    thr = _aniso_tile(thr, hdpi, vdpi)
+    tiled = _tile_to(thr, gray.shape)
     return (gray.astype(np.float32) > tiled).astype(np.uint8) * 255
 
 
-# The curated "top 5" halftone technologies offered in the comparison preview,
-# spanning the design space: AM screening, FM/blue-noise, two error-diffusion
-# variants, and ordered. (jarvis/stucki/sierra are also selectable via --dither.)
-TOP5_METHODS = ["clustered", "blue-noise", "atkinson", "floyd", "ordered"]
+def dither_blue_noise(gray: np.ndarray, hdpi: int = 204,
+                      vdpi: int = 196) -> np.ndarray:
+    return _screen_from_matrix(gray, _blue_noise_matrix(), hdpi, vdpi)
+
+
+def dither_green_noise(gray: np.ndarray, coarseness: float = 4.0,
+                       hdpi: int = 204, vdpi: int = 196) -> np.ndarray:
+    """Green-noise / hybrid AM-FM screening (section 1.1). Built by running
+    void-and-cluster with a larger Gaussian sigma so minority pixels coalesce
+    into mid-size clusters: a tunable point between blue-noise detail and
+    clustered-dot run-length/robustness. `coarseness` ~2 (near blue) .. 8 (near
+    clustered)."""
+    sigma = max(2.0, min(8.0, coarseness))
+    return _screen_from_matrix(gray, _vc_matrix(sigma, "greennoise"), hdpi, vdpi)
+
+
+def dither_edd(gray: np.ndarray, lam: float = 0.4, vdpi: int = 196) -> np.ndarray:
+    """Edge-enhancing error diffusion (Eschbach, section 2.3): add a high-pass
+    term before diffusing so glyph/edge structure survives while tone still
+    diffuses. Good for text sitting over a photographic background."""
+    sharp = pre_sharpen(gray, vdpi, amount=lam * 2.0)
+    return error_diffuse(sharp, "atkinson")
+
+
+def dither_line(gray: np.ndarray, hdpi: int = 204, vdpi: int = 196,
+                period: int = 0) -> np.ndarray:
+    """Horizontal line-screen halftone (woodcut / engraving look).
+
+    Tone is rendered as horizontal stripes whose *thickness* grows with
+    darkness: a triangular threshold profile across one vertical period is high
+    at the line center (so even highlights keep a hairline) and low at the
+    edges (so only deep shadows fill the gap). Because the lines run *along the
+    scanline*, the result is almost entirely long horizontal black/white runs —
+    the single most G4-friendly way to carry a continuous-tone image over a fax
+    line, while reading as a clean engraving rather than mud. The period is
+    derived from the vertical DPI (so stripe pitch is constant on paper)."""
+    if period <= 0:
+        # ~18 lines/inch: a bold, unmistakable woodcut pitch that survives both
+        # the fax channel and being downscaled into a preview.
+        period = max(4, int(round(vdpi / 18.0)))
+    # Triangular threshold profile across one period. A high peak (250) keeps a
+    # hairline even in highlights; a low edge (12) lets only deep shadows fill
+    # the gap to near-solid. Black where gray <= thr, so the dark stripe THICKENS
+    # smoothly as the local tone darkens — a line-conversion / engraving screen.
+    y = np.arange(period, dtype=np.float32)
+    center = (period - 1) / 2.0
+    d = np.abs(y - center) / max(center, 1e-6)      # 0 at center .. 1 at edge
+    peak, edge = 250.0, 12.0
+    thr = peak - (peak - edge) * d
+    tiled = _tile_to(thr.reshape(period, 1), gray.shape)
+    return (gray.astype(np.float32) > tiled).astype(np.uint8) * 255
+
+
+# The curated halftone technologies offered in the comparison preview, spanning
+# the design space: AM screening, AM-FM hybrid, FM/blue-noise, two error-diffusion
+# variants, and a horizontal line screen (woodcut). 6-up so the user can pick by
+# eye. (ordered/edd/jarvis/stucki/sierra are also selectable via --dither.)
+COMPARE_METHODS = ["clustered", "green-noise", "blue-noise", "atkinson",
+                   "floyd", "line"]
+# Backwards-compatible alias for older callers.
+TOP5_METHODS = COMPARE_METHODS
 
 HALFTONE_INFO = {
     "clustered": "Clustered-dot AM screening — longest runs, best G4 compression, "
                  "most robust over a noisy line; lowest apparent resolution.",
+    "green-noise": "Green-noise hybrid AM-FM — mid-size dot clusters: blue-noise "
+                   "detail with clustered-dot run-length/robustness. Tunable via "
+                   "coarseness; a strong default for a photo that must survive a "
+                   "bad line.",
     "blue-noise": "Void-and-cluster blue noise (FM) — isotropic organic stipple, "
                   "great perceived detail, no directional worms; mid compression.",
     "atkinson": "Atkinson error diffusion — clean whites, crisp thin features; "
@@ -394,17 +599,24 @@ HALFTONE_INFO = {
              "directional speckle is the worst case for G4 size and line noise.",
     "ordered": "Bayer ordered dithering — fast, predictable crosshatch; "
                "middling on both detail and compression.",
+    "line": "Horizontal line screen (woodcut/engraving) — tone as horizontal "
+            "stripes thickened by darkness; runs along the scanline so G4 size "
+            "is excellent and it reads cleanly, high-contrast, never muddy.",
+    "edd": "Edge-enhancing error diffusion — high-pass term sharpens edges while "
+           "diffusing tone; for text over a photographic background.",
     "jarvis": "Jarvis-Judice-Ninke error diffusion — wide 12-tap kernel, very "
               "smooth tone; heavy speckle, large G4 size.",
     "stucki": "Stucki error diffusion — 12-tap, sharp and smooth for print; "
               "heavy speckle, large G4 size.",
     "sierra": "Sierra error diffusion — Jarvis-like smoothness, a little cheaper.",
-    "none": "Hard Otsu threshold — no halftone; correct for pure text, line art, "
+    "none": "Hard threshold — no halftone; correct for pure text, line art, "
             "and barcodes/QR codes.",
 }
 
 # Accepted --dither aliases mapped to canonical names.
-DITHER_ALIASES = {"threshold": "none", "bayer": "ordered", "blue": "blue-noise"}
+DITHER_ALIASES = {"threshold": "none", "bayer": "ordered", "blue": "blue-noise",
+                  "green": "green-noise", "woodcut": "line", "engraving": "line",
+                  "lines": "line"}
 
 
 def recommend_dither(photo_fraction: float, fax_heavy: bool) -> tuple:
@@ -417,10 +629,11 @@ def recommend_dither(photo_fraction: float, fax_heavy: bool) -> tuple:
         return "clustered", (f"Large photo area ({photo_fraction * 100:.0f}%) or "
                              "fax-heavy mode: clustered-dot keeps runs long, so it "
                              "compresses best and survives a noisy line.")
-    return "atkinson", (f"Moderate photo area ({photo_fraction * 100:.0f}%) on a "
-                        "clean line: Atkinson keeps detail and clean whites without "
-                        "the heavy speckle (and G4 bloat) of Floyd/Jarvis. For a "
-                        "softer, more isotropic look, blue-noise is the close runner-up.")
+    return "green-noise", (f"Moderate photo area ({photo_fraction * 100:.0f}%): "
+                           "green-noise hybrid keeps blue-noise-level detail but "
+                           "clusters dots into longer runs, so it compresses and "
+                           "survives the line far better than Floyd/Atkinson. Drop "
+                           "to atkinson for the crispest whites on a clean line.")
 
 
 def choose_dither(name: str, fax_heavy: bool, photo_fraction: float) -> str:
@@ -429,19 +642,27 @@ def choose_dither(name: str, fax_heavy: bool, photo_fraction: float) -> str:
     return recommend_dither(photo_fraction, fax_heavy)[0]
 
 
-def halftone(gray: np.ndarray, name: str, vdpi: int) -> np.ndarray:
+def halftone(gray: np.ndarray, name: str, hdpi: int, vdpi: int,
+             coarseness: float = 4.0) -> np.ndarray:
     name = DITHER_ALIASES.get(name, name)
     if name == "none":
         return threshold_otsu(gray)
     if name == "floyd":
         return dither_floyd(gray)
     if name == "ordered":
-        return dither_ordered(gray)
+        return dither_ordered(gray, hdpi=hdpi, vdpi=vdpi)
     if name == "blue-noise":
-        return dither_blue_noise(gray)
+        return dither_blue_noise(gray, hdpi=hdpi, vdpi=vdpi)
+    if name == "green-noise":
+        return dither_green_noise(gray, coarseness=coarseness,
+                                  hdpi=hdpi, vdpi=vdpi)
+    if name == "edd":
+        return dither_edd(gray, vdpi=vdpi)
+    if name == "line":
+        return dither_line(gray, hdpi=hdpi, vdpi=vdpi)
     if name == "clustered":
         cell = max(4, min(10, round(vdpi / 32)))  # scale screen to dpi
-        return dither_clustered(gray, cell=cell)
+        return dither_clustered(gray, cell=cell, hdpi=hdpi, vdpi=vdpi)
     if name in ED_KERNELS:
         return error_diffuse(gray, name)
     raise ValueError(f"unknown dither: {name}")
@@ -521,16 +742,22 @@ def _prepare_page(page: fitz.Page, opt: FaxOptions):
     return gray, mask, photo_fraction, warnings, False
 
 
-def _apply_dither(gray, mask, dither_name, opt, vdpi) -> np.ndarray:
-    """Hard-threshold the whole page, then overlay the chosen halftone inside the
-    photo mask only (bounded to its bbox — the halftone is the expensive step)."""
-    text_bw = threshold_otsu(gray)
+def _apply_dither(gray, mask, dither_name, opt, hdpi, vdpi) -> np.ndarray:
+    """Binarize text/line content with the chosen adaptive binarizer, then
+    overlay the chosen halftone inside the photo mask only (bounded to its bbox).
+    Photo regions get dot-gain pre-correction and optional edge sharpening first,
+    so the channel renders the document well rather than just 'fax-ifying' it."""
+    text_bw = binarize_text(gray, opt.text_binarize, vdpi)
     dither_name = DITHER_ALIASES.get(dither_name, dither_name)
     if not mask.any() or dither_name == "none":
         return text_bw
     ys, xs = np.where(mask)
     y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
-    sub_ht = halftone(gray[y0:y1, x0:x1], dither_name, vdpi)
+    sub = gray[y0:y1, x0:x1]
+    if opt.sharpen:
+        sub = pre_sharpen(sub, vdpi)
+    sub = apply_tone_curve(sub, dither_name, opt.tone_curve)
+    sub_ht = halftone(sub, dither_name, hdpi, vdpi, opt.green_noise_coarseness)
     bw = text_bw.copy()
     sub_mask = mask[y0:y1, x0:x1]
     region = bw[y0:y1, x0:x1]
@@ -541,10 +768,11 @@ def _apply_dither(gray, mask, dither_name, opt, vdpi) -> np.ndarray:
 
 def process_page(page: fitz.Page, idx: int, opt: FaxOptions) -> tuple[Image.Image, PageReport]:
     rep = PageReport(index=idx)
-    _hdpi, vdpi = RESOLUTIONS[opt.resolution]
+    hdpi, vdpi = RESOLUTIONS[opt.resolution]
     gray, mask, photo_fraction, warnings, already = _prepare_page(page, opt)
     rep.warnings.extend(warnings)
     rep.photo_fraction = round(photo_fraction, 4)
+    rep.text_binarize = opt.text_binarize
 
     if already:
         rep.already_bilevel = True
@@ -554,7 +782,7 @@ def process_page(page: fitz.Page, idx: int, opt: FaxOptions) -> tuple[Image.Imag
     rep.photo_regions = int(mask.any())
     dname = choose_dither(opt.dither, opt.fax_heavy, photo_fraction)
     rep.dither = dname
-    bw = _apply_dither(gray, mask, dname, opt, vdpi)
+    bw = _apply_dither(gray, mask, dname, opt, hdpi, vdpi)
 
     if (bw == 0).mean() > 0.45:
         rep.warnings.append("inverted_or_heavy_black")
@@ -651,6 +879,32 @@ def _load_font(size: int):
     return ImageFont.load_default()
 
 
+def _oswald_font(size: int, weight: str = "Bold"):
+    """Condensed Oswald display face (matches the project logo) for headings.
+
+    Prefers the bundled Oswald variable font; falls back to a condensed/bold
+    system face, then to the generic loader, so it still renders anywhere."""
+    from PIL import ImageFont
+    bundled = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                           "..", "assets", "Oswald.ttf")
+    try:
+        f = ImageFont.truetype(bundled, size)
+        try:
+            f.set_variation_by_name(weight)
+        except Exception:
+            pass
+        return f
+    except Exception:
+        pass
+    for name in ("Oswald-Bold.ttf", "BebasNeue-Regular.ttf", "impact.ttf",
+                 "arialbd.ttf", "ariblk.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            continue
+    return _load_font(size)
+
+
 def _compose_contact_sheet(panels, metrics, recommended, cell_w=480):
     """panels: list of (method_name, PIL '1' image). Returns an RGB contact
     sheet with a labeled, metric-annotated panel per method."""
@@ -661,17 +915,23 @@ def _compose_contact_sheet(panels, metrics, recommended, cell_w=480):
         ch = max(1, int(rgb.height * (cell_w / rgb.width)))
         rendered.append((name, rgb.resize((cell_w, ch), Image.LANCZOS)))
 
-    cap, pad, title_h = 56, 16, 70
+    cap, pad, title_h = 58, 18, 150
     cols = 3 if len(rendered) > 4 else max(1, len(rendered))
     rows = (len(rendered) + cols - 1) // cols
     cell_h = max(r.height for _, r in rendered)
     W = pad + cols * (cell_w + pad)
     H = title_h + rows * (cell_h + cap + pad) + pad
-    canvas = Image.new("RGB", (W, H), (245, 245, 245))
+    canvas = Image.new("RGB", (W, H), (244, 244, 244))
     d = ImageDraw.Draw(canvas)
-    tf, cf, sf = _load_font(28), _load_font(19), _load_font(15)
-    d.text((pad, 16), "Fax halftone comparison \u2014 spend your eye tokens: "
-           "pick the panel that reads best", font=tf, fill=(15, 15, 15))
+    title_f = _oswald_font(76, "Bold")
+    sub_f = _oswald_font(30, "Medium")
+    lf, sf = _oswald_font(22, "SemiBold"), _load_font(15)
+    # Heavy Oswald display title to match the project logo, then a subtitle that
+    # keeps the "eye tokens" framing.
+    d.text((pad, 14), "FAX-OPTIMIZED HALFTONES", font=title_f, fill=(15, 15, 15))
+    d.text((pad + 2, 104),
+           "Spend your eye tokens \u2014 pick the panel that reads best after a "
+           "1-bit Group-3 transmission.", font=sub_f, fill=(96, 96, 96))
 
     for i, (name, rgb) in enumerate(rendered):
         r, c = divmod(i, cols)
@@ -679,12 +939,12 @@ def _compose_contact_sheet(panels, metrics, recommended, cell_w=480):
         y = title_h + r * (cell_h + cap + pad)
         is_rec = (name == recommended)
         d.rectangle([x, y, x + cell_w, y + cap],
-                    fill=(206, 234, 206) if is_rec else (224, 224, 224))
-        d.text((x + 8, y + 6),
+                    fill=(206, 234, 206) if is_rec else (228, 228, 228))
+        d.text((x + 10, y + 6),
                 name.upper() + ("   >> RECOMMENDED <<" if is_rec else ""),
-                font=cf, fill=(10, 10, 10))
+                font=lf, fill=(10, 10, 10))
         m = metrics.get(name, {})
-        d.text((x + 8, y + 30),
+        d.text((x + 10, y + 34),
                 f"{m.get('encoded_bytes', 0) / 1024:.0f} KB  \u00b7  "
                 f"~{m.get('est_transmission_s', 0):.0f}s / page",
                 font=sf, fill=(70, 70, 70))
@@ -701,8 +961,8 @@ def render_comparison(in_pdf: str, page_no: int, out_png: str, opt: FaxOptions,
     sheet, annotated with per-method G4 size + transmission estimate and a
     recommended pick, so a human can choose the optimal one by eye ("eye
     tokens"). Returns a dict of metrics + recommendation."""
-    methods = methods or TOP5_METHODS
-    _hdpi, vdpi = RESOLUTIONS[opt.resolution]
+    methods = methods or COMPARE_METHODS
+    hdpi, vdpi = RESOLUTIONS[opt.resolution]
     doc = fitz.open(in_pdf)
     page = doc[page_no - 1]
     gray, mask, photo_fraction, _warn, already = _prepare_page(page, opt)
@@ -710,7 +970,7 @@ def render_comparison(in_pdf: str, page_no: int, out_png: str, opt: FaxOptions,
     tmpdir = tempfile.mkdtemp(prefix="faxcmp_")
     panels, metrics = [], {}
     for m in methods:
-        bw = _postclean(_apply_dither(gray, mask, m, opt, vdpi), opt)
+        bw = _postclean(_apply_dither(gray, mask, m, opt, hdpi, vdpi), opt)
         img = Image.fromarray(bw.astype(np.uint8)).convert("1")
         tp = os.path.join(tmpdir, f"{m}.tif")
         nbytes = encode_g4_tiff(img, tp)

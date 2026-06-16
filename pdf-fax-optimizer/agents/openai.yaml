@@ -1,0 +1,10 @@
+# Optional Codex sidecar: UI metadata for the skill list.
+# The SKILL.md frontmatter (name/description) remains the source of truth for
+# triggering; this only customizes how the skill is presented in Codex.
+name: pdf-fax-optimizer
+display_name: PDF FAX
+description: >-
+  Maximize document quality and readability over a fax network — convert a PDF,
+  Word, PowerPoint, Excel, or image file to a 1-bit CCITT-G4 PDF/TIFF that arrives
+  LEGIBLE after Group-3 transmission (a fax's whole job is to be read), and
+  optionally send it via a cloud fax API.

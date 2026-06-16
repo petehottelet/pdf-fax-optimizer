@@ -19,6 +19,11 @@ PIP_PKGS = {
     "img2pdf": "img2pdf",
 }
 
+# Only needed to transmit via a cloud fax API (scripts/send_fax.py).
+OPTIONAL_PKGS = {
+    "requests": "requests",
+}
+
 
 def ensure_pip(mod, pkg):
     try:
@@ -45,13 +50,25 @@ def main():
         ok = ok and good
         print(f"  {pkg:24s} {status}")
 
+    print("Python packages (optional — for sending faxes):")
+    for mod, pkg in OPTIONAL_PKGS.items():
+        good, status = ensure_pip(mod, pkg)
+        print(f"  {pkg:24s} {status if good else 'missing (optional)'}")
+
     # Fax mode embeds CCITT-G4 via img2pdf and does not require any CLI tool.
     # qpdf / ghostscript are optional (handy for separate PDF work) — reported
-    # for convenience only.
+    # for convenience only. LibreOffice (soffice) is optional too, needed only
+    # to convert Word/PowerPoint/Excel/OpenDocument input to PDF.
     print("CLI tools (optional):")
     for tool in ("qpdf", "gs"):
         path = shutil.which(tool)
         print(f"  {tool:24s} {'present' if path else 'missing'} (optional)")
+
+    import to_pdf  # local module; finds soffice on PATH or common locations
+    soffice = to_pdf.find_soffice()
+    print(f"  {'libreoffice (soffice)':24s} "
+          f"{soffice if soffice else 'missing'} "
+          f"(optional — for Office/OpenDocument input)")
 
     if not ok:
         print("\nSome required pip packages are missing. They should self-install "
