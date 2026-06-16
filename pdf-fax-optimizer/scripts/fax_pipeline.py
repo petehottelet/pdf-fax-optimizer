@@ -1022,7 +1022,7 @@ def _compose_contact_sheet(panels, metrics, recommended, cell_w=480):
     cell_h = max(r.height for _, r in rendered)
     W = pad + cols * (cell_w + pad)
     H = title_h + rows * (cell_h + cap + pad) + pad
-    canvas = Image.new("RGB", (W, H), (244, 244, 244))
+    canvas = Image.new("RGB", (W, H), (255, 255, 255))
     d = ImageDraw.Draw(canvas)
     lf, sf = _oswald_font(22, "SemiBold"), _load_font(15)
 
