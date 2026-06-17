@@ -198,7 +198,19 @@ to the right converter.
     white. Body text on a white page is untouched: its local mean stays light.
   **Never dither text** — dithering destroys edge sharpness and legibility, and
   explodes transition density on exactly the content people most need to read.
-- **Photos / continuous-tone** → halftone per §3.
+- **Photos / continuous-tone** → halftone per §3. Region detection uses the PDF's
+  embedded-image rectangles, but a **single image that covers (nearly) the whole
+  page** — a scan or an exported cover sheet — is not a photo: trusting that
+  rectangle would route the entire document, text and all, to the halftone and
+  dither the words into faint dotted mush. So when the embedded mask spans most of
+  the page (>80%) the genuine photo is found with the local-variance heuristic and
+  then **consolidated into a solid region** — closing small gaps, filling interior
+  holes, keeping only large components. That keeps *flat areas inside the photo*
+  (a colored sign that greys to a mid tone, a patch of sky) on the halftone path
+  instead of binarizing them to stark white, while the page's own text-on-white
+  areas, which lie outside the photo, fall back to crisp binarization. If nothing
+  reads as continuous-tone, the mask is empty and the whole page is binarized —
+  correct for a text-only scan.
 - **Text baked into an image** → rescued back to the legibility path. Captions,
   signs, screenshots and (importantly) a whole page scanned as a single image all
   put text *inside* the photo region, where a naive pipeline would halftone it
@@ -234,6 +246,44 @@ Bilevel + low dpi quietly kills fine detail, so the pipeline actively defends it
   (Rec. 601/709), not a flat channel average. Watch colors that wash out:
   yellow highlights, light blue, light green, and red-on-dark can disappear or
   invert legibility. Warn when a page is dominated by such colors.
+- **Robust image text (chroma rescue).** Warning is not enough when the text
+  *only* differs from its background in hue — yellow on cyan is the canonical
+  case: both map to similar luminance, so desaturate-then-threshold erases the
+  glyphs no matter how the binarizer is tuned. The fix has to happen **in color,
+  before grayscale conversion**, because that is the only stage where the
+  discriminating signal (chroma) still exists. `--robust-text` finds baked-in
+  sign/image text as the **union of a chroma detector and a luminance detector**:
+  the chroma one catches light, low-luminance coloured text (high a/b contrast),
+  the luminance one catches darker baked-in text — and they are complementary,
+  because on a glossy sign one word reads by colour and the next by brightness, so
+  neither alone covers the whole line. Both run the same conservative
+  wide/short/dense text-line gate, **multi-scale** so thick signage strokes
+  register as well as thin body text. (Text on a near-white field is skipped — the
+  binarizer already renders document text crisp.) It segments glyph-vs-field with a
+  k=2 LAB clustering (ink = the **minority** colour cluster, since glyphs cover
+  less area than their field whether the text is the light element or the dark
+  one) and **recolors the glyphs to solid black** — restoring luminance contrast
+  directly. A backing is then added *only
+  where the background needs it*, judged by how dark the field will be **after
+  halftoning** (a mid grey screens to many dots, so the test models the screen,
+  not raw luma):
+  - a **light** field (a cyan sign greys light enough to screen ~¼ dots) carries
+    solid black on its own → nothing else is touched: it halftones normally, no
+    plate, no glow, no dither fringe;
+  - a **mid** field (a gold sign screens denser, ~⅓ dots, where black would drown)
+    gets a **clean thick solid white stroke** around the glyphs (binarized, so it
+    stays crisp — never a halftoned gradient), knocking them clear of the dots;
+  - a **too-dark** field can carry no solid-black treatment; since genuine
+    light-on-dark text keeps high luminance contrast and is never detected here,
+    these are almost always photo-chroma noise → rejected, never stamped.
+
+  Two more guards keep it honest: a region is committed only if its segmentation is
+  genuinely text-like (ink coverage in a sane band — rejects chroma noise from
+  foliage/gradients), and the composited result is re-binarized as a gross-failure
+  guard (revert anything that collapsed to a near-solid slab). The per-region
+  decision (`bg_luma`, `backing`) is reported under `robust_text`. `auto` acts only
+  when such text is present; on a normal black-on-white page nothing matches and it
+  is a no-op.
 
 ---
 
@@ -283,6 +333,9 @@ The output should be cheap and robust to send, not just small on disk:
 | `--tone-curve` | `auto` | Per-family dot-gain pre-correction so photos don't plug to black (§3) |
 | `--sharpen` | off | Edge-aware unsharp on photo regions before halftoning (§3) |
 | `--no-text-in-image` | (rescue on) | Disable rescue of text baked into photos; halftone the whole image region (§4) |
+| `--robust-text` | `auto` | Rescue washout-prone *colored* text (chroma-high, luminance-low) by recoloring to solid black, adding a stroke only if the background is too dark, + self-verify; `on` scans harder, `off` disables (§5) |
+| `--robust-text-stroke` | `0.15` | Thickness of the contrasting stroke (× glyph height) drawn only in the dark-background case; light/mid backgrounds get no backing (§5) |
+| `--robust-text-preview` | none | Write a before/after PNG of the page faxed without vs with the robust-text recolor (§5) |
 | `--compare-page` | none | Render the curated 6-up of schemas to one contact sheet so a human can pick by eye (§3) |
 | `--compare-original` | off | Lead the sheet with original-color (#1) + true-grayscale (#2) references, then four halftones |
 | `--compare-methods` | curated | Override which schemas appear in the comparison |

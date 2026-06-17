@@ -49,6 +49,10 @@ def build_fax_options(cfg, args) -> fax.FaxOptions:
         green_noise_coarseness=pick(args.green_noise_coarseness,
                                     "green_noise_coarseness", 4.0),
         text_in_image=pick(args.text_in_image, "text_in_image", True),
+        robust_image_text=pick(args.robust_text, "robust_image_text", "auto"),
+        robust_text_stroke=pick(args.robust_text_stroke, "robust_text_stroke", 0.15),
+        ocr_text=pick(args.ocr_text, "ocr_text", "off"),
+        ocr_conf_min=pick(args.ocr_conf, "ocr_conf_min", 0.6),
     )
 
 
@@ -87,6 +91,34 @@ def main():
                    action="store_false", default=None,
                    help="don't rescue text baked into photos; halftone the whole "
                         "image region (text-in-image rescue is on by default)")
+    p.add_argument("--robust-text", choices=["auto", "on", "off"], default=None,
+                   dest="robust_text",
+                   help="rescue washout-prone COLORED text (e.g. yellow on cyan) "
+                        "that grayscale loses: detect by chroma, recolor to solid "
+                        "black-on-white, and self-verify legibility. 'auto' "
+                        "(default) acts only when such text is found; 'on' scans "
+                        "more aggressively; 'off' disables")
+    p.add_argument("--robust-text-stroke", type=float, default=None,
+                   dest="robust_text_stroke", metavar="MULT",
+                   help="thickness of the contrasting stroke drawn behind rescued "
+                        "text, as a multiple of glyph height (default 0.15). Only "
+                        "applied where the background is too dark for solid-black "
+                        "text on its own; light/mid backgrounds get no backing")
+    p.add_argument("--robust-text-preview", type=int, default=None,
+                   metavar="PAGE",
+                   help="write a before/after contact sheet for PAGE showing the "
+                        "page faxed WITHOUT vs WITH robust-text recolor")
+    p.add_argument("--ocr-text", choices=["off", "auto", "on"], default=None,
+                   dest="ocr_text",
+                   help="RECOGNISE text baked into images (OCR) and re-typeset it "
+                        "crisply, recovering words the signal path can't (e.g. a "
+                        "sign word lost to near-zero contrast). Off by default; "
+                        "needs an OCR engine (rapidocr-onnxruntime). OCR can misread "
+                        "— verify recognised words in the report/preview")
+    p.add_argument("--ocr-conf", type=float, default=None, dest="ocr_conf",
+                   metavar="C",
+                   help="minimum OCR confidence (0–1) to re-typeset a word "
+                        "(default 0.5)")
     p.add_argument("--fax-heavy", action="store_true")
     p.add_argument("--segmentation",
                    choices=["embedded", "variance", "none"], default=None)
@@ -179,6 +211,17 @@ def main():
         fax.render_preview(src_pdf, args.preview_page, png, opt)
         print(f"Preview written: {png}")
 
+    if args.robust_text_preview:
+        png = (os.path.splitext(args.output)[0]
+               + f".robusttext_p{args.robust_text_preview}.png")
+        rtp = fax.render_robust_text_preview(
+            src_pdf, args.robust_text_preview, png, opt)
+        rt = rtp.get("robust_text") or {}
+        print(f"Robust-text before/after: {png}")
+        print(f"  regions detected: {rt.get('regions_detected', 0)}, "
+              f"recovered: {rt.get('regions_recovered', 0)}, "
+              f"unrecovered: {rt.get('regions_unrecovered', 0)}")
+
     report = fax.convert_pdf(src_pdf, args.output, opt)
     # Report against the original file the user handed us, not the intermediate.
     report["input"] = args.input
@@ -232,6 +275,24 @@ def _print_summary(report):
     binar = sorted({p.get("text_binarize", "") for p in report["pages"]} - {""})
     if binar:
         print(f"text binarizer: {', '.join(binar)}")
+    rt_det = sum((p.get("robust_text") or {}).get("regions_detected", 0)
+                 for p in report["pages"])
+    if rt_det:
+        rt_rec = sum((p.get("robust_text") or {}).get("regions_recovered", 0)
+                     for p in report["pages"])
+        rt_un = sum((p.get("robust_text") or {}).get("regions_unrecovered", 0)
+                    for p in report["pages"])
+        print(f"robust image text: {rt_det} colored region(s) detected, "
+              f"{rt_rec} recolored for contrast"
+              + (f", {rt_un} left as-is (no rescue needed)" if rt_un else ""))
+    ocr_words = [w for p in report["pages"]
+                 for w in (p.get("ocr_text") or {}).get("words", [])]
+    if ocr_words:
+        shown = ", ".join(f"“{w['text']}”({w['conf']:.2f})"
+                          for w in ocr_words[:8])
+        more = "" if len(ocr_words) <= 8 else f", +{len(ocr_words) - 8} more"
+        print(f"OCR text recovered: {len(ocr_words)} word(s) re-typeset — "
+              f"{shown}{more}  (verify these are correct)")
     print(f"est. transmission: {report['total_est_transmission_s']:.0f}s "
           f"(~{report['total_est_transmission_s'] / 60:.1f} min)")
     if report.get("comparison"):

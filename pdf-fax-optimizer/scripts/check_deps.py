@@ -19,9 +19,16 @@ PIP_PKGS = {
     "img2pdf": "img2pdf",
 }
 
-# Only needed to transmit via a cloud fax API (scripts/send_fax.py).
+# Optional features:
+#  - requests: transmit via a cloud fax API (scripts/send_fax.py)
+#  - rapidocr_onnxruntime: --ocr-text, recognise & re-typeset baked-in image text
+#    (self-contained ONNX models, no system binary). Reported, not auto-installed,
+#    since it's a large optional download only needed for the OCR feature.
 OPTIONAL_PKGS = {
     "requests": "requests",
+}
+OPTIONAL_REPORT_ONLY = {
+    "rapidocr_onnxruntime": "rapidocr-onnxruntime (for --ocr-text)",
 }
 
 
@@ -54,6 +61,15 @@ def main():
     for mod, pkg in OPTIONAL_PKGS.items():
         good, status = ensure_pip(mod, pkg)
         print(f"  {pkg:24s} {status if good else 'missing (optional)'}")
+
+    print("Python packages (optional — for --ocr-text image text recognition):")
+    for mod, label in OPTIONAL_REPORT_ONLY.items():
+        try:
+            importlib.import_module(mod)
+            status = "present"
+        except ImportError:
+            status = "missing (pip install rapidocr-onnxruntime to enable)"
+        print(f"  {label:40s} {status}")
 
     # Fax mode embeds CCITT-G4 via img2pdf and does not require any CLI tool.
     # qpdf / ghostscript are optional (handy for separate PDF work) — reported

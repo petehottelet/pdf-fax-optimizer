@@ -4,6 +4,16 @@
 
 # PDF FAX — an Agent Skill
 
+<p align="center">
+  <img alt="PyPI: package not published" src="https://img.shields.io/badge/pypi-package%20not%20published-red.svg">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
+  <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-blue.svg">
+  <img alt="Claude + Codex" src="https://img.shields.io/badge/Claude%20%2B%20Codex-agent%20ready-555555.svg">
+  <img alt="Agent Skill (SKILL.md)" src="https://img.shields.io/badge/Agent%20Skill-SKILL.md-orange.svg">
+  <img alt="Formats: PDF, DOCX, PPTX, XLSX, image" src="https://img.shields.io/badge/formats-.pdf%20%7C%20.docx%20%7C%20.pptx%20%7C%20.xlsx%20%7C%20image-777777.svg">
+  <img alt="Output: fax PDF, TIFF, JSON, PNG preview" src="https://img.shields.io/badge/output-.fax.pdf%20%7C%20.tiff%20%7C%20.json%20%7C%20.png-8A2BE2.svg">
+</p>
+
 A portable [Agent Skill](https://www.anthropic.com/news/skills) that teaches an
 AI coding agent to **maximize document quality and readability when sending a
 PDF over a fax network.** It converts a PDF into a fax-native **1-bit bilevel
@@ -160,8 +170,18 @@ MRC-lite segmentation keeps your text crisp and undithered while photos get the
 halftone treatment, so the page that lands on the receiving machine is one a
 human can actually read.
 
+**Robust image text** goes further for *colored* text that a grayscale fax
+silently loses — think yellow lettering on a cyan sign, where the two map to
+nearly the same luminance and the words dissolve the moment the page is
+desaturated. `--robust-text` (on by default) detects such text by its *chroma*,
+recolors it to solid black, and adds a clean contrasting backing only where the
+background is too dark to carry it — then verifies the result is legible in the
+actual 1-bit output. In the comparison below, watch the **VILLA DEL SOL** sign:
+readable in the color original, *gone* in the true-grayscale reference, and
+brought back to solid, legible black in every fax halftone.
+
 <p align="center">
-  <img src="docs/compare_example.png" alt="Six-panel fax comparison showing original color, true grayscale, and four fax halftone treatments" width="100%">
+  <img src="docs/compare_example.png" alt="Six-panel fax comparison showing original color, true grayscale washing out the colored sign text, and four fax halftone treatments with the text rescued to solid black" width="100%">
 </p>
 
 ## Input formats — fax a PDF, or a Word, PowerPoint, Excel, or image file
