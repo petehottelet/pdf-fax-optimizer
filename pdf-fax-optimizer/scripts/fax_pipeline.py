@@ -90,12 +90,32 @@ class FaxOptions:
     sharpen: bool = False           # edge-aware unsharp on photo regions
     green_noise_coarseness: float = 4.0  # green-noise AM<->FM knob (~2..8)
     text_in_image: bool = True      # rescue text baked into photos (don't halftone it)
-    robust_image_text: str = "off"   # off|on|auto  OCR-driven recolor of text inside images (opt-in)
-    robust_text_stroke: float = 0.15  # retained for back-compat; unused in the OCR/#808080 path
+    recover_text: str = "off"   # off|on|auto  OCR-driven recolor of text inside images (opt-in)
+    # Heuristic rescue for dark text sitting on a small saturated-colour
+    # "highlight pill" (label chips on slides, status badges in dashboards,
+    # form-field highlights, etc.). In grayscale the bright fill collapses to
+    # a mid-tone the contrast binarizer treats as "dark field, light text",
+    # flips polarity, and shreds the glyphs. With this on, the pill is
+    # lifted to white BEFORE binarization so the dark text reads cleanly.
+    # Off-by-default would have left a default-mode user with broken labels
+    # on slide decks — the failure was loud enough that it warrants the
+    # default-on heuristic (matches the existing text_in_image policy).
+    preserve_text: bool = True
+    recover_text_stroke: float = 0.15  # retained for back-compat; unused in the OCR/#808080 path
     ocr_text: str = "auto"           # off|auto|on  OCR-driven polarity for ALL page text
     ocr_conf_min: float = 0.5        # minimum OCR confidence to recolor a word
     transmission_safe: bool = False  # clamp scanline to 1728 px for real G3 transmission
     basic: bool = False              # bare-minimum pipeline: gray + Otsu, no MRC/OCR/cleanup
+    # Generalised AM screen ("screen" dither) — selectable spot function + angle.
+    # `clustered` is the historical name; passing --dither screen makes the shape
+    # explicit. dot_shape: round|square|diamond|ellipse. screen_angle in degrees,
+    # also applied to the `line` screen for diagonal engraving.
+    dot_shape: str = "round"
+    screen_angle: float = 0.0
+    # Crosshatch — comma-separated angle list, default two perpendicular sets.
+    # 2 perpendicular sets keep transition density near `line`; more angles
+    # multiply transitions and push it into expressive territory.
+    hatch_angles: tuple = (0.0, 90.0)
 
 
 @dataclass
@@ -108,7 +128,7 @@ class PageReport:
     dither: str = ""
     text_binarize: str = ""
     already_bilevel: bool = False
-    robust_text: dict = field(default_factory=dict)
+    recover_text: dict = field(default_factory=dict)
     ocr_text: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
 
@@ -212,7 +232,7 @@ def render_page_gray(page: fitz.Page, hdpi: int, vdpi: int,
 def render_page_color(page: fitz.Page, hdpi: int, vdpi: int,
                       max_w: int) -> np.ndarray:
     """Render a page to an RGB ndarray on the same square grid as render_page_gray.
-    Used by OCR, robust-text, and the multi-panel sample sheet."""
+    Used by OCR, recover-text, and the multi-panel sample sheet."""
     eff = _effective_dpi(page, max(hdpi, vdpi))
     sx, sy = _page_scale(page.rect.width, int(round(eff)), int(round(eff)), max_w)
     mat = fitz.Matrix(sx, sy)
@@ -348,6 +368,108 @@ def variance_photo_mask(gray: np.ndarray, block: int = 24,
         if stats[i, cv2.CC_STAT_AREA] >= min_area:
             out[labels == i] = 1
     return out.astype(bool)
+
+
+def preserve_text_mask(rgb: np.ndarray,
+                                gray: np.ndarray,
+                                block: int = 24,
+                                chroma_lo: float = 12.0,
+                                max_area_frac: float = 0.04,
+                                dark_thr: int = 110,
+                                min_dark_frac: float = 0.04,
+                                max_dark_frac: float = 0.50,
+                                pad: int = 4) -> np.ndarray:
+    """Find small saturated-colour fields that contain dark text strokes;
+    return a mask of pixels to LIFT TO WHITE before binarization.
+
+    The motivating failure mode: a slide / form / dashboard places a label
+    inside a coloured "highlight pill" (text BLACK on a saturated lime /
+    orange / cyan / blue chip). The original page is high-contrast and
+    legible. After RGB→gray demotion the bright fill collapses to a
+    mid-tone (~140 luma) and dark text on a dark-ish field has too little
+    contrast to survive: the `contrast` text binarizer sees the pill as a
+    "dark field with light text", flips polarity, paints the pill solid
+    black, and knocks the glyphs out — they arrive as a mangled cross-
+    hatch that's effectively illegible on the receiving end.
+
+    The cure: in the gray image, drop the pill's tone to white. The black
+    text now reads as crisp black-on-white and binarizes cleanly. We
+    sacrifice the "this is a highlight" visual cue, but on a 1-bit fax
+    channel that cue was going to die anyway — the trade is a legible
+    label for a colour we couldn't render. Same playbook as the
+    photo-region exclude: prefer text legibility over decorative tone.
+
+    Detection (must satisfy *all*):
+      - **High chroma** in the source RGB (`chroma_lo`) — saturated colour,
+        not a barely-tinted gray. Subtle tints stay on the binarizer path.
+      - **Small area** (`max_area_frac` of page) — large coloured regions
+        are photos, illustrations, or full-bleed colour panels (e.g.
+        slide 6's lime backdrop) and have to keep their tone via the
+        halftone path, not get blanked.
+      - **Dark text density** inside the bbox between
+        `min_dark_frac`..`max_dark_frac` — too few dark pixels means a
+        plain coloured logo with no text inside (`min_dark_frac` skips
+        it); too many means a near-solid dark chip (no text rescue
+        possible) → leave alone.
+
+    Returns a bool mask over the page; the caller bitwise-ANDs with
+    `~photo_region` so the rescue never touches actual photo content."""
+    h, w = gray.shape
+    rgbf = rgb.astype(np.float32)
+    r, g, b = rgbf[..., 0], rgbf[..., 1], rgbf[..., 2]
+    mc = (r + g + b) / 3.0
+    chroma = np.sqrt(((r - mc) ** 2 + (g - mc) ** 2 + (b - mc) ** 2) / 3.0)
+    if chroma.max() < chroma_lo:
+        return np.zeros((h, w), bool)
+
+    # Per-pixel saturation gate then morph-close so the text strokes inside
+    # the pill (which sample the dark glyph colour, not the saturated fill)
+    # don't punch holes in the detected region.
+    seed = (chroma > chroma_lo).astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (block, block))
+    seed = cv2.morphologyEx(seed, cv2.MORPH_CLOSE, k)
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(seed, 8)
+    out = np.zeros((h, w), bool)
+    max_area = max_area_frac * h * w
+    for i in range(1, n):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area > max_area:
+            continue
+        x0 = stats[i, cv2.CC_STAT_LEFT]
+        y0 = stats[i, cv2.CC_STAT_TOP]
+        ww = stats[i, cv2.CC_STAT_WIDTH]
+        hh = stats[i, cv2.CC_STAT_HEIGHT]
+        comp = (labels[y0:y0 + hh, x0:x0 + ww] == i).astype(np.uint8)
+        sub_gray = gray[y0:y0 + hh, x0:x0 + ww]
+        n_comp = int(comp.sum())
+        if n_comp < 16:
+            continue
+        # Dark-density gate. Too few darks = a plain colour swatch with no
+        # text inside (a logo, a slide-deck accent block); too many = a
+        # near-solid dark chip whose "text" is the chip itself. The middle
+        # band is the text-on-colour signature.
+        dark_pixels = (sub_gray < dark_thr) & (comp == 1)
+        n_dark = int(dark_pixels.sum())
+        frac = n_dark / n_comp
+        if not (min_dark_frac <= frac <= max_dark_frac):
+            continue
+        # Whiten only the FILL — component minus dark text strokes. Whiten-
+        # ing the strokes too erases the very text we're trying to rescue
+        # (the original bug: the labels vanished alongside their pills). A
+        # small outward dilation of the fill catches the anti-aliased ring
+        # around the pill so the binarizer doesn't draw a faint border.
+        fill = (comp == 1) & ~dark_pixels
+        if pad > 0:
+            fill_u8 = fill.astype(np.uint8)
+            fill_u8 = cv2.dilate(
+                fill_u8,
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE,
+                                          (pad * 2 + 1, pad * 2 + 1)))
+            # ...but never re-include the protected dark strokes.
+            fill = fill_u8.astype(bool) & ~dark_pixels
+        out[y0:y0 + hh, x0:x0 + ww] |= fill
+    return out
 
 
 def _fill_component_holes(mask: np.ndarray) -> np.ndarray:
@@ -631,7 +753,7 @@ def _text_line_filter(strokes: np.ndarray, vdpi: int, sw: int) -> np.ndarray:
 # so the halftone screen can never disturb them.
 #
 # The same function handles both scopes: text OUTSIDE images (the document's
-# header/footer/form text) and, when --robust-text is on, text INSIDE images
+# header/footer/form text) and, when --recover-text is on, text INSIDE images
 # (signage, captions). The only difference between the two calls is the region
 # mask the OCR is scoped to.
 
@@ -761,7 +883,7 @@ def apply_ocr_polarity(rgb: np.ndarray, region_mask: np.ndarray | None,
     - scope="doc":   region_mask = pixels OUTSIDE images. This catches the page's
                      header/footer/form text, including white-on-coloured headers
                      a global Otsu threshold or naive binarizer can flip.
-    - scope="image": region_mask = pixels INSIDE photo regions (robust-text). This
+    - scope="image": region_mask = pixels INSIDE photo regions (recover-text). This
                      catches signage and captions baked into the photo.
 
     Returns (text_black, text_white, halftone_exclude, info). The two text
@@ -776,7 +898,7 @@ def apply_ocr_polarity(rgb: np.ndarray, region_mask: np.ndarray | None,
 
     OCR is optional: if `rapidocr-onnxruntime` isn't installed, the function
     returns empty masks and the rest of the pipeline still works (the binarizer
-    handles plain document text on its own; only the OCR-driven robust path goes
+    handles plain document text on its own; only the OCR-driven recover path goes
     quiet). The polarity is decided **per sign** (words grouped by proximity)
     so all glyphs on one sign carry the same treatment."""
     import ocr_text
@@ -922,16 +1044,159 @@ def _solid_fill_mask(g: np.ndarray, mean: np.ndarray,
     return (mean < dark_level) & (g < bright)
 
 
-# --- Photo pre-conditioning (applied before the halftone, photo region only) - #
-# Effective dot gain on a 1-bit channel is large: without correction midtones
-# plug to solid black and a photo arrives as a silhouette. Screens gain more
-# than error diffusion, so the correction is calibrated per family. gamma<1
-# lifts midtones (counteracts the darkening).
-_TONE_GAMMA = {
-    "clustered": 0.62, "ordered": 0.66, "blue-noise": 0.70, "green-noise": 0.66,
-    "floyd": 0.85, "atkinson": 0.82, "jarvis": 0.85, "stucki": 0.85,
-    "sierra": 0.85, "edd": 0.82, "line": 0.90,
+# --------------------------------------------------------------------------- #
+# Screen registry — single source of truth for the halftone library.          #
+# --------------------------------------------------------------------------- #
+# Every halftone schema registers one entry here. The dataclass carries the
+# small pile of metadata each screen needs:
+#
+#   - `family`     : "am" (clustered cell) | "fm" (stochastic) | "ed" (error
+#                    diffusion) | "line" (1-D / stripe) | "bilevel" (none).
+#                    Used by the registry refactor itself + future
+#                    `--compare-family` switching.
+#   - `fax_safe`   : True iff the screen is eligible for `--dither auto` and
+#                    the default `--compare-page` 6-up. Expressive screens
+#                    (mezzotint, future spiral/glyph/etc.) set this False so
+#                    they must be named explicitly.
+#   - `gamma`      : Per-screen dot-gain pre-correction. The fax channel has
+#                    large effective dot gain — without lifting midtones a
+#                    photo plugs to a silhouette. Screens gain more than ED,
+#                    so the correction is calibrated per family. Same
+#                    semantics as the old _TONE_GAMMA dict (gamma<1 lifts).
+#   - `info`       : One-line description for the contact-sheet caption and
+#                    the `--list-dithers` style help.
+#   - `aliases`    : Accepted --dither aliases that map to this canonical
+#                    name. `clustered` carries `round` so `--dither round`
+#                    is equivalent.
+#
+# `HALFTONE_INFO`, `_TONE_GAMMA`, and `DITHER_ALIASES` are *derived* from this
+# dict below so adding a new screen is one line, not four out-of-sync edits.
+@dataclass(frozen=True)
+class Screen:
+    family: str
+    fax_safe: bool
+    gamma: float
+    info: str
+    aliases: tuple = ()
+
+
+SCREENS: dict[str, Screen] = {
+    "none": Screen(
+        "bilevel", True, 1.0,
+        "Hard threshold — no halftone; correct for pure text, line art, and "
+        "barcodes/QR codes.",
+        ("threshold",),
+    ),
+    "clustered": Screen(
+        "am", True, 0.62,
+        "Clustered-dot AM screening — longest runs, best G4 compression, "
+        "most robust over a noisy line; lowest apparent resolution.",
+        ("round",),
+    ),
+    "screen": Screen(
+        "am", True, 0.62,
+        "Generalised AM dot screen — selectable spot function via "
+        "--dot-shape {round|square|diamond|ellipse} and optional "
+        "--screen-angle. `clustered` is the historical name for the round "
+        "default; `screen --dot-shape square` is a crisp blocky look, "
+        "`diamond` is the classic newspaper-photo aesthetic, and "
+        "`ellipse` smooths midtone joins.",
+        (),
+    ),
+    "ordered": Screen(
+        "am", True, 0.66,
+        "Bayer ordered dithering — fast, predictable crosshatch; "
+        "middling on both detail and compression.",
+        ("bayer",),
+    ),
+    "blue-noise": Screen(
+        "fm", True, 0.70,
+        "Void-and-cluster blue noise (FM) — isotropic organic stipple, "
+        "great perceived detail, no directional worms; mid compression.",
+        ("blue", "stipple"),
+    ),
+    "green-noise": Screen(
+        "fm", True, 0.66,
+        "Green-noise hybrid AM-FM — mid-size dot clusters: blue-noise "
+        "detail with clustered-dot run-length/robustness. Tunable via "
+        "coarseness; a strong default for a photo that must survive a "
+        "bad line.",
+        ("green",),
+    ),
+    "floyd": Screen(
+        "ed", True, 0.85,
+        "Floyd-Steinberg error diffusion — classic, maximum detail; "
+        "directional speckle is the worst case for G4 size and line noise.",
+        (),
+    ),
+    "atkinson": Screen(
+        "ed", True, 0.82,
+        "Atkinson error diffusion — clean whites, crisp thin features; "
+        "good detail, looser compression than screening.",
+        (),
+    ),
+    "jarvis": Screen(
+        "ed", True, 0.85,
+        "Jarvis-Judice-Ninke error diffusion — wide 12-tap kernel, very "
+        "smooth tone; heavy speckle, large G4 size.",
+        (),
+    ),
+    "stucki": Screen(
+        "ed", True, 0.85,
+        "Stucki error diffusion — 12-tap, sharp and smooth for print; "
+        "heavy speckle, large G4 size.",
+        (),
+    ),
+    "sierra": Screen(
+        "ed", True, 0.85,
+        "Sierra error diffusion — Jarvis-like smoothness, a little cheaper.",
+        (),
+    ),
+    "edd": Screen(
+        "ed", True, 0.82,
+        "Edge-enhancing error diffusion — high-pass term sharpens edges "
+        "while diffusing tone; for text over a photographic background.",
+        (),
+    ),
+    "line": Screen(
+        "line", True, 0.90,
+        "Horizontal line screen (woodcut/engraving) — tone as horizontal "
+        "stripes thickened by darkness; runs along the scanline so G4 size "
+        "is excellent and it reads cleanly, high-contrast, never muddy. "
+        "Optional --screen-angle for diagonal engraving (off-axis angles "
+        "shorten runs and warn).",
+        ("woodcut", "engraving", "lines"),
+    ),
+    "crosshatch": Screen(
+        "line", True, 0.85,
+        "Crosshatch / engraving — layered angled line screens lit by tone "
+        "bands; reads as pen-and-ink etching. Default two perpendicular "
+        "sets keep transition density near `line`; more --hatch-angles "
+        "multiply transitions.",
+        ("hatch", "etching"),
+    ),
+    "mezzotint": Screen(
+        "am", False, 0.75,
+        "Mezzotint random-threshold grain — unstructured stippling, "
+        "velvety midtones. No spatial coherence → poor G4 compression and "
+        "high line-noise sensitivity. Expressive: not eligible for `auto`.",
+        ("grain",),
+    ),
 }
+
+
+HALFTONE_INFO: dict[str, str] = {n: s.info for n, s in SCREENS.items()}
+# `apply_tone_curve` reads this; only entries with a non-trivial gamma need
+# to be present (the bilevel `none` screen has gamma=1.0 and is omitted so
+# apply_tone_curve short-circuits to identity).
+_TONE_GAMMA: dict[str, float] = {n: s.gamma for n, s in SCREENS.items()
+                                 if s.gamma != 1.0}
+# Accepted --dither aliases mapped to canonical names. Built from each
+# screen's `aliases` tuple so adding a new alias is one line.
+DITHER_ALIASES: dict[str, str] = {
+    alias: name for name, s in SCREENS.items() for alias in s.aliases
+}
+FAX_SAFE_SCREENS: frozenset = frozenset(n for n, s in SCREENS.items() if s.fax_safe)
 
 
 def apply_tone_curve(gray: np.ndarray, dither_name: str, mode: str) -> np.ndarray:
@@ -1038,20 +1303,114 @@ def dither_ordered(gray: np.ndarray, n: int = 8, hdpi: int = 204,
     return (gray.astype(np.float32) > tiled).astype(np.uint8) * 255
 
 
+def _spot_function(shape: str, cell: int) -> np.ndarray:
+    """Per-pixel "darkness rank" basis inside a single cell, before argsort.
+
+    Lower values turn black first — i.e. the cluster origin. Each shape's
+    growth front is one of these classic spot functions:
+
+      - round:   Euclidean distance from centre   → round dot (the historical
+                 `clustered` default; spiral growth).
+      - square:  Chebyshev / max(|dx|,|dy|)       → square dot, blocky look.
+      - diamond: Manhattan / |dx|+|dy|            → diamond dot, classic
+                 newspaper photo.
+      - ellipse: anisotropic Euclidean (a≠b)      → elliptical dot, smoother
+                 midtone joins (chained dots vertically).
+    """
+    yy, xx = np.mgrid[0:cell, 0:cell].astype(np.float32)
+    cx = cy = (cell - 1) / 2.0
+    dx, dy = xx - cx, yy - cy
+    if shape == "round":
+        return np.sqrt(dx * dx + dy * dy)
+    if shape == "square":
+        return np.maximum(np.abs(dx), np.abs(dy))
+    if shape == "diamond":
+        return np.abs(dx) + np.abs(dy)
+    if shape == "ellipse":
+        # 1:1.7 aspect — visibly elongated without breaking tile boundaries.
+        return np.sqrt(dx * dx + (dy / 1.7) ** 2)
+    raise ValueError(f"unknown dot-shape: {shape!r}  (round|square|diamond|ellipse)")
+
+
+def _screen_tile(shape: str, cell: int) -> np.ndarray:
+    """Threshold tile (float32, 0..255) for an AM screen of the given shape and
+    cell size. Identical computation to the historical `dither_clustered`
+    for shape='round', so passing `--dither clustered` (or `--dither screen
+    --dot-shape round` with the auto cell size) is byte-identical to the
+    pre-registry output."""
+    f = _spot_function(shape, cell)
+    order = f.argsort(axis=None).argsort().reshape(cell, cell)
+    return (order.astype(np.float32) + 0.5) / (cell * cell) * 255.0
+
+
+def _auto_cell(vdpi: int) -> int:
+    """Standard cell-size derivation for AM screens. Matches the historical
+    `halftone()` rule for `clustered`, so back-compat is preserved."""
+    return max(4, min(10, round(vdpi / 32)))
+
+
 def dither_clustered(gray: np.ndarray, cell: int = 6, hdpi: int = 204,
                      vdpi: int = 196) -> np.ndarray:
     """Clustered-dot (AM) screening. Dots grow in a cluster, producing long runs
     that compress far better and survive a noisy line. `cell` is scaled from the
     fax dpi by the caller so the screen doesn't collapse after re-thresholding,
-    and the tile is resampled to the device aspect so dots stay round on paper."""
-    # spiral-ordered threshold within a cell -> growth from center outward
-    yy, xx = np.mgrid[0:cell, 0:cell]
-    cx = cy = (cell - 1) / 2.0
-    dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
-    order = dist.argsort(axis=None).argsort().reshape(cell, cell)
-    thr = (order + 0.5) / (cell * cell) * 255.0
-    thr = _aniso_tile(thr.astype(np.float32), hdpi, vdpi)
-    tiled = _tile_to(thr, gray.shape)
+    and the tile is resampled to the device aspect so dots stay round on paper.
+
+    Thin wrapper around `dither_screen(..., shape='round')` so the registry has
+    one canonical screen implementation and `clustered` stays byte-identical
+    to its pre-registry output."""
+    return dither_screen(gray, hdpi=hdpi, vdpi=vdpi,
+                         shape="round", angle=0.0, cell=cell)
+
+
+def dither_screen(gray: np.ndarray, hdpi: int = 204, vdpi: int = 196,
+                  shape: str = "round", angle: float = 0.0,
+                  cell: int | None = None) -> np.ndarray:
+    """Generalised AM dot screen.
+
+    `shape` picks the spot function (round/square/diamond/ellipse — see
+    `_spot_function`). `cell` defaults to the same DPI-scaled size used by
+    `dither_clustered` so dot pitch stays consistent across the family.
+    `angle` rotates the screen in image space: at 0° we tile the threshold
+    block directly (fast, byte-identical to the historical clustered path);
+    for non-zero angles we sample the threshold tile at rotated coordinates
+    per pixel so the dot lattice tilts uniformly across the photo region.
+
+    Off-axis angles trade off some G4 compression (shorter horizontal runs)
+    for the classic 15°/45° angled-screen aesthetic. The threshold tile is
+    NOT itself rotated — we rotate the sampling grid — which avoids the
+    tile-seam artefact you get from rotating-then-tiling a small block.
+
+    Non-round shapes need at least 5 cells to differ from `round`: at the
+    4×4 minimum auto-cell, the Manhattan/Chebyshev/anisotropic-Euclidean
+    rank orderings all collapse onto the same sequence (positions like
+    (1,1) vs (0,2) only diverge once the grid is large enough to contain
+    both). We bump the cell floor to 5 in that case so the shape choice
+    actually shows up in the output. `round` keeps the historical cell=4
+    floor so `--dither clustered` stays byte-identical to its pre-registry
+    output at low render DPI.
+    """
+    if cell is None:
+        cell = _auto_cell(vdpi)
+        if shape != "round" and cell < 5:
+            cell = 5
+    thr = _aniso_tile(_screen_tile(shape, cell), hdpi, vdpi)
+    th, tw = thr.shape
+    if angle == 0.0:
+        tiled = _tile_to(thr, gray.shape)
+    else:
+        h, w = gray.shape
+        rad = float(np.deg2rad(angle))
+        cosA, sinA = np.cos(rad), np.sin(rad)
+        # Sample (x, y) in image space, rotate to the screen's local axes,
+        # mod by the (anisotropic) tile period, look up the threshold rank.
+        ys = np.arange(h, dtype=np.float32).reshape(h, 1)
+        xs = np.arange(w, dtype=np.float32).reshape(1, w)
+        u = xs * cosA + ys * sinA
+        v = -xs * sinA + ys * cosA
+        cu = np.mod(u, tw).astype(np.int32)
+        cv = np.mod(v, th).astype(np.int32)
+        tiled = thr[cv, cu]
     return (gray.astype(np.float32) > tiled).astype(np.uint8) * 255
 
 
@@ -1188,17 +1547,25 @@ def dither_edd(gray: np.ndarray, lam: float = 0.4, vdpi: int = 196) -> np.ndarra
 
 
 def dither_line(gray: np.ndarray, hdpi: int = 204, vdpi: int = 196,
-                period: int = 0) -> np.ndarray:
-    """Horizontal line-screen halftone (woodcut / engraving look).
+                period: int = 0, angle: float = 0.0) -> np.ndarray:
+    """Line-screen halftone (woodcut / engraving look).
 
-    Tone is rendered as horizontal stripes whose *thickness* grows with
-    darkness: a triangular threshold profile across one vertical period is high
-    at the line center (so even highlights keep a hairline) and low at the
-    edges (so only deep shadows fill the gap). Because the lines run *along the
-    scanline*, the result is almost entirely long horizontal black/white runs —
-    the single most G4-friendly way to carry a continuous-tone image over a fax
-    line, while reading as a clean engraving rather than mud. The period is
-    derived from the vertical DPI (so stripe pitch is constant on paper)."""
+    Tone is rendered as parallel stripes whose *thickness* grows with darkness:
+    a triangular threshold profile across one period is high at the line center
+    (so even highlights keep a hairline) and low at the edges (so only deep
+    shadows fill the gap). At `angle=0.0` (the default) the lines run *along
+    the scanline*, so the result is almost entirely long horizontal
+    black/white runs — the single most G4-friendly way to carry a
+    continuous-tone image over a fax line, while reading as a clean engraving
+    rather than mud. The period is derived from the vertical DPI (so stripe
+    pitch is constant on paper).
+
+    `angle` rotates the stripes in image space. Diagonal engraving (15° or
+    45°) reads as a classic copper-plate hatch, but the longer "runs along
+    the scan-line" property dies off as the angle grows, so off-axis angles
+    pay a real G4 cost — `recommend_dither`/`auto` therefore never picks an
+    angled line screen, and the user passing one gets a warning emitted by
+    the caller."""
     if period <= 0:
         # ~18 lines/inch: a bold, unmistakable woodcut pitch that survives both
         # the fax channel and being downscaled into a preview.
@@ -1207,13 +1574,110 @@ def dither_line(gray: np.ndarray, hdpi: int = 204, vdpi: int = 196,
     # hairline even in highlights; a low edge (12) lets only deep shadows fill
     # the gap to near-solid. Black where gray <= thr, so the dark stripe THICKENS
     # smoothly as the local tone darkens — a line-conversion / engraving screen.
-    y = np.arange(period, dtype=np.float32)
     center = (period - 1) / 2.0
-    d = np.abs(y - center) / max(center, 1e-6)      # 0 at center .. 1 at edge
     peak, edge = 250.0, 12.0
-    thr = peak - (peak - edge) * d
-    tiled = _tile_to(thr.reshape(period, 1), gray.shape)
+    if angle == 0.0:
+        y = np.arange(period, dtype=np.float32)
+        d = np.abs(y - center) / max(center, 1e-6)
+        thr_period = peak - (peak - edge) * d
+        tiled = _tile_to(thr_period.reshape(period, 1), gray.shape)
+    else:
+        # Rotated coord u = x·sinθ + y·cosθ; threshold profile is a function of
+        # (u mod period). Sample per-pixel — fast and avoids the seam artefact
+        # of rotating-then-tiling a 1-D profile.
+        h, w = gray.shape
+        rad = float(np.deg2rad(angle))
+        sinA, cosA = np.sin(rad), np.cos(rad)
+        ys = np.arange(h, dtype=np.float32).reshape(h, 1)
+        xs = np.arange(w, dtype=np.float32).reshape(1, w)
+        u = xs * sinA + ys * cosA
+        u_mod = np.mod(u, period)
+        d = np.abs(u_mod - center) / max(center, 1e-6)
+        tiled = peak - (peak - edge) * d
     return (gray.astype(np.float32) > tiled).astype(np.uint8) * 255
+
+
+def dither_crosshatch(gray: np.ndarray, hdpi: int = 204, vdpi: int = 196,
+                      angles: tuple = (0.0, 90.0),
+                      period: int = 0) -> np.ndarray:
+    """Layered angled line screens, lit by tone bands — the pen-and-ink etching
+    look. For each angle in `angles` we build a stripe field (same triangular
+    profile as `dither_line`) whose stripe THICKNESS keys to a per-angle tone
+    band: angle `i` fires once darkness exceeds `bands[i]` and grows from a
+    hairline to a half-period stripe at full darkness. Layers are unioned, so
+    midtones get one direction of hatch and deep shadows get the cross-hatch.
+
+    Two angles at 0° and 90° (the default) give the most G4-friendly variant:
+    horizontal runs survive for the upper-band layer, and the vertical layer
+    only fires in the darker tail. Three or four angles read as a denser
+    engraving but multiply the transition count along every scanline — the
+    user is warned by the caller if `len(angles) > 2`.
+
+    Wider stripe pitch than `dither_line` (~14 vs 18 lpi) so individual
+    strokes read as visible pen lines rather than collapsing into smooth tone.
+    """
+    if period <= 0:
+        period = max(4, int(round(vdpi / 14.0)))
+
+    h, w = gray.shape
+    # Per-pixel darkness in [0, 1].
+    d_arr = 1.0 - gray.astype(np.float32) / 255.0
+    half_period = period / 2.0
+    n = max(1, len(angles))
+    # Equally spaced band thresholds: the first stripe set fires earliest, the
+    # last only in deep shadow. With n=2 → [1/3, 2/3] etc.
+    bands = [(i + 1) / (n + 1) for i in range(n)]
+
+    ys = np.arange(h, dtype=np.float32).reshape(h, 1)
+    xs = np.arange(w, dtype=np.float32).reshape(1, w)
+
+    ink = np.zeros((h, w), dtype=bool)
+    for i, angle in enumerate(angles):
+        rad = float(np.deg2rad(angle))
+        sinA, cosA = np.sin(rad), np.cos(rad)
+        u = xs * sinA + ys * cosA
+        # Distance from the nearest line centre, normalised to half-period.
+        u_mod = np.mod(u, period)
+        dist_to_center = np.abs(u_mod - half_period)
+        # Stripe radius grows from 0 (just past band threshold) to half_period
+        # (fully black) — normalised so each band reaches max thickness at
+        # darkness=1.0 regardless of where the band starts.
+        band_lo = bands[i]
+        excess = np.clip((d_arr - band_lo) / max(1.0 - band_lo, 1e-6), 0.0, 1.0)
+        stripe_radius = excess * half_period
+        ink |= (dist_to_center < stripe_radius)
+
+    out = np.where(ink, 0, 255).astype(np.uint8)
+    return out
+
+
+# Mezzotint cache: each random-tile seed maps to a 256×256 rank matrix. The
+# tile is uniform random — unlike blue-noise's void-and-cluster ranking, which
+# enforces inter-pixel spacing — so the result is *unstructured* stippling.
+_MEZZ_CACHE: dict[int, np.ndarray] = {}
+
+
+def _mezzotint_tile(seed: int = 0) -> np.ndarray:
+    if seed in _MEZZ_CACHE:
+        return _MEZZ_CACHE[seed]
+    rng = np.random.default_rng(int(seed))
+    t = rng.permutation(256 * 256).reshape(256, 256).astype(np.int64)
+    _MEZZ_CACHE[seed] = t
+    return t
+
+
+def dither_mezzotint(gray: np.ndarray, hdpi: int = 204, vdpi: int = 196,
+                     seed: int = 0) -> np.ndarray:
+    """Random-threshold (mezzotint) screening.
+
+    A uniform-random rank tile turned into a threshold field, same code path
+    as `dither_blue_noise` minus the void-and-cluster ordering. The result is
+    velvety, unstructured grain — visually distinct from blue-noise FM
+    (which is engineered to *avoid* low-frequency clumping). Because the
+    ranks are uncorrelated spatially, the output has maximum 1-bit transition
+    density per row, so G4 compression and line-noise robustness are both
+    poor; this screen is expressive-tier and excluded from `auto`."""
+    return _screen_from_matrix(gray, _mezzotint_tile(seed), hdpi, vdpi)
 
 
 # The curated halftone technologies offered in the comparison preview, spanning
@@ -1231,39 +1695,8 @@ COMPARE5_METHODS = COMPARE4_METHODS
 # Backwards-compatible alias for older callers.
 TOP5_METHODS = COMPARE_METHODS
 
-HALFTONE_INFO = {
-    "clustered": "Clustered-dot AM screening — longest runs, best G4 compression, "
-                 "most robust over a noisy line; lowest apparent resolution.",
-    "green-noise": "Green-noise hybrid AM-FM — mid-size dot clusters: blue-noise "
-                   "detail with clustered-dot run-length/robustness. Tunable via "
-                   "coarseness; a strong default for a photo that must survive a "
-                   "bad line.",
-    "blue-noise": "Void-and-cluster blue noise (FM) — isotropic organic stipple, "
-                  "great perceived detail, no directional worms; mid compression.",
-    "atkinson": "Atkinson error diffusion — clean whites, crisp thin features; "
-                "good detail, looser compression than screening.",
-    "floyd": "Floyd-Steinberg error diffusion — classic, maximum detail; "
-             "directional speckle is the worst case for G4 size and line noise.",
-    "ordered": "Bayer ordered dithering — fast, predictable crosshatch; "
-               "middling on both detail and compression.",
-    "line": "Horizontal line screen (woodcut/engraving) — tone as horizontal "
-            "stripes thickened by darkness; runs along the scanline so G4 size "
-            "is excellent and it reads cleanly, high-contrast, never muddy.",
-    "edd": "Edge-enhancing error diffusion — high-pass term sharpens edges while "
-           "diffusing tone; for text over a photographic background.",
-    "jarvis": "Jarvis-Judice-Ninke error diffusion — wide 12-tap kernel, very "
-              "smooth tone; heavy speckle, large G4 size.",
-    "stucki": "Stucki error diffusion — 12-tap, sharp and smooth for print; "
-              "heavy speckle, large G4 size.",
-    "sierra": "Sierra error diffusion — Jarvis-like smoothness, a little cheaper.",
-    "none": "Hard threshold — no halftone; correct for pure text, line art, "
-            "and barcodes/QR codes.",
-}
-
-# Accepted --dither aliases mapped to canonical names.
-DITHER_ALIASES = {"threshold": "none", "bayer": "ordered", "blue": "blue-noise",
-                  "green": "green-noise", "woodcut": "line", "engraving": "line",
-                  "lines": "line"}
+# `HALFTONE_INFO`, `_TONE_GAMMA`, `DITHER_ALIASES`, and `FAX_SAFE_SCREENS` are
+# derived above from the SCREENS registry.
 
 
 def recommend_dither(photo_fraction: float, fax_heavy: bool,
@@ -1307,7 +1740,24 @@ def choose_dither(name: str, fax_heavy: bool, photo_fraction: float,
 
 
 def halftone(gray: np.ndarray, name: str, hdpi: int, vdpi: int,
-             coarseness: float = 4.0) -> np.ndarray:
+             coarseness: float = 4.0,
+             dot_shape: str = "round",
+             screen_angle: float = 0.0,
+             hatch_angles: tuple = (0.0, 90.0),
+             mezzotint_seed: int = 0) -> np.ndarray:
+    """Dispatch a named halftone schema (see `SCREENS`).
+
+    Extra parameters are screen-specific and have no effect on screens that
+    don't read them:
+
+      - `coarseness`     : green-noise AM↔FM knob (~2 detail … 8 robust).
+      - `dot_shape`      : spot function for `screen` (round/square/diamond/
+                           ellipse). `clustered` always uses round.
+      - `screen_angle`   : screen rotation in degrees, used by `screen` and
+                           `line`. Off-axis pays G4 cost — caller warns.
+      - `hatch_angles`   : tuple of crosshatch angles. `len() > 2` warns.
+      - `mezzotint_seed` : RNG seed for reproducible mezzotint output.
+    """
     name = DITHER_ALIASES.get(name, name)
     if name == "none":
         return threshold_otsu(gray)
@@ -1323,10 +1773,19 @@ def halftone(gray: np.ndarray, name: str, hdpi: int, vdpi: int,
     if name == "edd":
         return dither_edd(gray, vdpi=vdpi)
     if name == "line":
-        return dither_line(gray, hdpi=hdpi, vdpi=vdpi)
+        return dither_line(gray, hdpi=hdpi, vdpi=vdpi, angle=screen_angle)
+    if name == "screen":
+        return dither_screen(gray, hdpi=hdpi, vdpi=vdpi,
+                             shape=dot_shape, angle=screen_angle)
     if name == "clustered":
-        cell = max(4, min(10, round(vdpi / 32)))  # scale screen to dpi
-        return dither_clustered(gray, cell=cell, hdpi=hdpi, vdpi=vdpi)
+        return dither_clustered(gray, cell=_auto_cell(vdpi),
+                                hdpi=hdpi, vdpi=vdpi)
+    if name == "crosshatch":
+        return dither_crosshatch(gray, hdpi=hdpi, vdpi=vdpi,
+                                 angles=hatch_angles)
+    if name == "mezzotint":
+        return dither_mezzotint(gray, hdpi=hdpi, vdpi=vdpi,
+                                seed=mezzotint_seed)
     if name in ED_KERNELS:
         return error_diffuse(gray, name)
     raise ValueError(f"unknown dither: {name}")
@@ -1373,7 +1832,7 @@ def detect_washout_colors(page: fitz.Page) -> list:
 
 def _compute_photo_region(page, gray, opt, hdpi, vdpi, rgb=None):
     """The continuous-tone (photo) region to halftone, before any text-keep masks
-    are subtracted. Shared by OCR/robust-text scoping and the final mask.
+    are subtracted. Shared by OCR/recover-text scoping and the final mask.
 
     `rgb` (optional) feeds the colour-aware photo discriminator inside
     `variance_photo_mask` — for full-page wrapped rasters the chroma gate is
@@ -1452,6 +1911,30 @@ def _prepare_page(page: fitz.Page, opt: FaxOptions):
         page, flatten_background(base_gray) if opt.flatten_bg else base_gray,
         opt, eff_dpi, eff_dpi, rgb=rgb)
 
+    # Highlight-pill rescue. Find small saturated-colour fields outside the
+    # photo region that contain dark text strokes, and lift them to white
+    # in BOTH the gray (for the binarizer) and the RGB (so OCR, if it runs
+    # later, sees the same field tone and skips painting white glyphs on
+    # what's now a light-field word). This is the cure for the slide-4
+    # failure mode: a label "Active accounts" on a saturated lime chip
+    # collapses to gray=140-ish where the contrast binarizer flips polarity
+    # and knocks the glyphs out as a mangled crosshatch. After whitening,
+    # the same text reads as clean black-on-white through the standard
+    # binarize path. Photo content is protected via `~photo`; large
+    # coloured panels are protected via the `max_area_frac` filter inside
+    # `preserve_text_mask` (slide 6's lime backdrop keeps its
+    # halftone).
+    if opt.preserve_text and rgb is not None and rgb.ndim == 3:
+        whiten = preserve_text_mask(rgb, base_gray)
+        whiten &= ~photo
+        if whiten.any():
+            base_gray = base_gray.copy()
+            base_gray[whiten] = 255
+            rgb = rgb.copy()
+            rgb[whiten] = 255
+            kpx = int(whiten.sum() / 1000)
+            warnings.append(f"text_preserved:{kpx}kpx")
+
     text_black = np.zeros(base_gray.shape, bool)
     text_white = np.zeros(base_gray.shape, bool)
     halftone_exclude = np.zeros(base_gray.shape, bool)
@@ -1460,14 +1943,14 @@ def _prepare_page(page: fitz.Page, opt: FaxOptions):
         return sum(1 for w in info.get("words", []) if w.get("rendered"))
 
     # OCR is the slow step (an inference pass per page). It is the engine for
-    # *both* the doc-text polarity recolour AND the within-image robust-text
+    # *both* the doc-text polarity recolour AND the within-image recover-text
     # recolour, so it only ever runs when the user has opted into the
-    # robust-text feature (`opt.robust_image_text != "off"`). With robust-text
+    # recover-text feature (`opt.recover_text != "off"`). With recover-text
     # off the chroma-aware photo segmenter routes form/body/footer text out of
     # the halftone path on its own, and the binarizer's adaptive contrast
     # threshold handles polarity inside white-paper text — so the OCR pass
     # would be pure overhead (20+ minutes on a 6-page 391-DPI deck).
-    if opt.robust_image_text != "off":
+    if opt.recover_text != "off":
         # (1) Document text — pixels OUTSIDE the photo region. Apply the
         # #808080 polarity rule to the page's own header/footer/form text:
         # white-on-coloured bars, body text on tinted blocks, etc.
@@ -1554,14 +2037,18 @@ def _apply_dither(gray, mask, dither_name, opt, hdpi, vdpi,
         if opt.sharpen:
             sub = pre_sharpen(sub, vdpi)
         sub = apply_tone_curve(sub, dither_name, opt.tone_curve)
-        sub_ht = halftone(sub, dither_name, hdpi, vdpi, opt.green_noise_coarseness)
-        # Heuristic text-in-image rescue runs ONLY when robust text is on. The
+        sub_ht = halftone(sub, dither_name, hdpi, vdpi,
+                          coarseness=opt.green_noise_coarseness,
+                          dot_shape=opt.dot_shape,
+                          screen_angle=opt.screen_angle,
+                          hatch_angles=opt.hatch_angles)
+        # Heuristic text-in-image rescue runs ONLY when recover-text is on. The
         # default-mode contract is "image content rendered as-is" — the
         # billboard, signage, and captions inside a photo are halftoned along
-        # with the rest of the picture, no special handling. Robust text is
+        # with the rest of the picture, no special handling. Recover-text is
         # the user-opt-in switch that turns on text recovery inside images;
         # this stroke-detector backs up the OCR pass for any words it missed.
-        if opt.text_in_image and opt.robust_image_text != "off":
+        if opt.text_in_image and opt.recover_text != "off":
             tmask = text_in_image_mask(gray[y0:y1, x0:x1], vdpi)
             if tmask.any():
                 sub_ht = np.where(tmask, text_bw[y0:y1, x0:x1], sub_ht)
@@ -1603,7 +2090,7 @@ def process_page(page: fitz.Page, idx: int, opt: FaxOptions) -> tuple[Image.Imag
     rep.photo_fraction = round(photo_fraction, 4)
     rep.text_binarize = opt.text_binarize
     if image_info.get("words"):
-        rep.robust_text = image_info
+        rep.recover_text = image_info
     if doc_info.get("words"):
         rep.ocr_text = doc_info
 
@@ -1615,6 +2102,7 @@ def process_page(page: fitz.Page, idx: int, opt: FaxOptions) -> tuple[Image.Imag
     rep.photo_regions = int(mask.any())
     dname = choose_dither(opt.dither, opt.fax_heavy, photo_fraction, eff_dpi)
     rep.dither = dname
+    rep.warnings.extend(_screen_choice_warnings(dname, opt))
     bw = _apply_dither(gray, mask, dname, opt, eff_dpi, eff_dpi,
                        text_black=text_black, text_white=text_white)
 
@@ -1622,6 +2110,27 @@ def process_page(page: fitz.Page, idx: int, opt: FaxOptions) -> tuple[Image.Imag
         rep.warnings.append("inverted_or_heavy_black")
     rep.warnings.extend(detect_washout_colors(page))
     return _finalize(bw.astype(np.uint8), rep, opt, protect=mask), rep
+
+
+def _screen_choice_warnings(dither_name: str, opt: "FaxOptions") -> list:
+    """Honest-cost warnings for screen choices that compromise the channel.
+
+    A user can name an expressive screen or stack an off-axis angled line on
+    top of `screen`/`line`; the pipeline will produce it, but the JSON report
+    should call out that the result may not survive a real fax line. Same
+    style as `inverted_or_heavy_black` / `wash_out_color:*` — terse, keyed
+    strings the caller can grep.
+    """
+    warns: list = []
+    name = DITHER_ALIASES.get(dither_name, dither_name)
+    info = SCREENS.get(name)
+    if info is not None and not info.fax_safe:
+        warns.append(f"expressive_screen:{name}")
+    if name in ("screen", "line") and abs(opt.screen_angle) > 15.0:
+        warns.append(f"off_axis_screen:{name}:{opt.screen_angle:.0f}deg")
+    if name == "crosshatch" and len(opt.hatch_angles) > 2:
+        warns.append(f"crosshatch_dense:{len(opt.hatch_angles)}_angles")
+    return warns
 
 
 def _postclean(bw: np.ndarray, opt: FaxOptions,
@@ -1769,30 +2278,30 @@ def render_preview(in_pdf: str, page_no: int, out_png: str, opt: FaxOptions):
     return out_png
 
 
-def render_robust_text_preview(in_pdf: str, page_no: int, out_png: str,
+def render_recover_text_preview(in_pdf: str, page_no: int, out_png: str,
                                opt: FaxOptions) -> dict:
-    """Side-by-side proof that robust-image-text helped: the exact bilevel page as
+    """Side-by-side proof that recover-text helped: the exact bilevel page as
     it would fax WITHOUT the within-image OCR recolor (left) vs WITH it (right).
     Document-text OCR (outside images) stays on for both panels — only the
-    within-image robust pass is toggled, so the comparison isolates that effect.
-    Returns the recognised words and their polarity decisions."""
+    within-image recover-text pass is toggled, so the comparison isolates that
+    effect. Returns the recognised words and their polarity decisions."""
     import dataclasses
-    off = dataclasses.replace(opt, robust_image_text="off")
+    off = dataclasses.replace(opt, recover_text="off")
     before, _ = process_page(fitz.open(in_pdf)[page_no - 1], page_no, off)
     after, rep = process_page(fitz.open(in_pdf)[page_no - 1], page_no, opt)
-    rt = rep.robust_text or {}
+    rt = rep.recover_text or {}
     nblack = rt.get("words_recolored_black", 0)
     nwhite = rt.get("words_recolored_white", 0)
     metrics = {
-        "before": {"original": True, "label": "WITHOUT robust text",
+        "before": {"original": True, "label": "WITHOUT recover text",
                    "note": "colored/low-contrast image text as a plain fax"},
-        "after": {"original": True, "label": "WITH robust text",
+        "after": {"original": True, "label": "WITH recover text",
                   "note": (f"{nblack} black + {nwhite} white word(s) recolored "
                            "by the #808080 rule")},
     }
     _compose_contact_sheet([("before", before), ("after", after)],
                            metrics, recommended="after").save(out_png)
-    return {"page": page_no, "output": out_png, "robust_text": rt}
+    return {"page": page_no, "output": out_png, "recover_text": rt}
 
 
 def render_sample(in_pdf: str, page_no: int, out_png: str,
@@ -1803,17 +2312,17 @@ def render_sample(in_pdf: str, page_no: int, out_png: str,
     b) GRAYSCALE — the same page desaturated, no other processing. This is the
        continuous-tone input the 1-bit channel has to approximate.
     c) HALFTONE ONLY — bilevel page with halftoning on image areas, document
-       text crisp via the binarizer, but no within-image robust-text recolor
+       text crisp via the binarizer, but no within-image recover-text recolor
        (so signage stays as the channel sees it). Document-text OCR is still on
        so headers/footers carry their #808080 polarity.
-    d) HALFTONE + ROBUST TEXT — the full pipeline, with within-image words
+    d) HALFTONE + RECOVER TEXT — the full pipeline, with within-image words
        recoloured BLACK/WHITE per the #808080 rule and composited above the
        halftoned image layer.
 
-    Panel c) reflects the user's options with robust text forced OFF; panel d)
-    forces robust text ON. The sheet's whole point is to show what robust text
-    does, so it's wired into d) regardless of the user's default — the *opt-in*
-    is for the actual conversion, not for the diagnostic sample."""
+    Panel c) reflects the user's options with recover-text forced OFF; panel d)
+    forces recover-text ON. The sheet's whole point is to show what recover-
+    text does, so it's wired into d) regardless of the user's default — the
+    *opt-in* is for the actual conversion, not for the diagnostic sample."""
     import dataclasses
     doc = fitz.open(in_pdf)
     page = doc[page_no - 1]
@@ -1821,12 +2330,12 @@ def render_sample(in_pdf: str, page_no: int, out_png: str,
     color = render_page_color(page, hdpi, vdpi, opt.max_scanline_px)
     gray_ref = render_page_gray(page, hdpi, vdpi, opt.max_scanline_px)
 
-    no_robust = dataclasses.replace(opt, robust_image_text="off")
-    with_robust = dataclasses.replace(opt, robust_image_text="on")
-    halftone_img, ht_rep = process_page(page, page_no, no_robust)
-    full_img, full_rep = process_page(page, page_no, with_robust)
+    no_recover = dataclasses.replace(opt, recover_text="off")
+    with_recover = dataclasses.replace(opt, recover_text="on")
+    halftone_img, ht_rep = process_page(page, page_no, no_recover)
+    full_img, full_rep = process_page(page, page_no, with_recover)
 
-    rt = full_rep.robust_text or {}
+    rt = full_rep.recover_text or {}
     di = full_rep.ocr_text or {}
     nblack = rt.get("words_recolored_black", 0)
     nwhite = rt.get("words_recolored_white", 0)
@@ -1836,7 +2345,7 @@ def render_sample(in_pdf: str, page_no: int, out_png: str,
         ("original", Image.fromarray(color, "RGB")),
         ("grayscale", Image.fromarray(gray_ref).convert("L")),
         ("halftone", halftone_img),
-        ("robust", full_img),
+        ("recover", full_img),
     ]
     metrics = {
         "original":  {"original": True, "label": "a) ORIGINAL (color)",
@@ -1845,14 +2354,14 @@ def render_sample(in_pdf: str, page_no: int, out_png: str,
                       "note": "desaturated source \u00b7 not a fax"},
         "halftone":  {"original": True, "label": "c) HALFTONE on image areas",
                       "note": (f"document text crisp ({docw} word(s) by "
-                               "#808080); robust text OFF \u00b7 fax preview")},
-        "robust":    {"original": True, "label": "d) HALFTONE + ROBUST TEXT",
+                               "#808080); recover-text OFF \u00b7 fax preview")},
+        "recover":   {"original": True, "label": "d) HALFTONE + RECOVER TEXT",
                       "note": (f"image text recoloured: {nblack} black + "
                                f"{nwhite} white \u00b7 fax preview")},
     }
-    _compose_contact_sheet(panels, metrics, recommended="robust").save(out_png)
+    _compose_contact_sheet(panels, metrics, recommended="recover").save(out_png)
     return {"page": page_no, "output": out_png,
-            "doc_text": di, "robust_text": rt}
+            "doc_text": di, "recover_text": rt}
 
 
 # --------------------------------------------------------------------------- #

@@ -12,10 +12,10 @@ compatibility: >-
   Requires Python 3 with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
   img2pdf. Sending a fax additionally needs the requests package; faxing
   Office/OpenDocument files (Word/PowerPoint/Excel) needs LibreOffice (headless);
-  the OCR-driven text-polarity passes (--ocr-text and --robust-text) need
+  the OCR-driven text-polarity passes (--ocr-text and --recover-text) need
   rapidocr-onnxruntime (self-contained, no system binary). Without OCR the
   skill still works — it falls back to the binarizer's default black-on-white
-  for document text and skips the within-image robust-text recolor. No CLI
+  for document text and skips the within-image recover-text recolor. No CLI
   tools are required for PDF/image input. Run scripts/check_deps.py first; it
   installs the pip packages if missing.
 ---
@@ -130,14 +130,14 @@ What the pipeline does, per page (details in the reference):
    and line art outside the photo region go to the adaptive binarizer; the
    photo region goes to a halftone schema. *Never dither text.*
 3. **OCR (off by default).** The OCR engine is the slow step (~20 min on a
-   6-page 391-DPI deck) and is **only run when `--robust-text` is on**. When
+   6-page 391-DPI deck) and is **only run when `--recover-text` is on**. When
    it runs it provides the #808080 polarity recolour in two scopes:
    - **Document text OUTSIDE images** (header/footer/form text). Every
      recognised word is bucketed by the **#808080 rule**: median field
      luminance below 128 → glyphs marked WHITE; at or above 128 → glyphs
      marked BLACK. (`--ocr-text off` keeps the OCR pass but skips this
      scope.)
-   - **Text INSIDE images** (`--robust-text on`). Same #808080 rule, scoped
+   - **Text INSIDE images** (`--recover-text on`). Same #808080 rule, scoped
      to the photo region. Each word's ORIGINAL glyph pixels are segmented
      from the colour image and marked BLACK or WHITE per its sign's median
      field — preserving real letterforms, never retypesetting.
@@ -148,6 +148,21 @@ What the pipeline does, per page (details in the reference):
    field — which is correct for the overwhelmingly common case. OCR is the
    escape hatch for white-on-coloured headers, signage inside photos, and
    captions baked into screenshots.
+4. **Preserve-text rescue (default on, no OCR needed).** When a slide /
+   dashboard / form puts dark text inside a *small saturated-colour chip*
+   (e.g. a lime / orange / cyan / blue "highlight pill" behind a label),
+   the bright fill collapses to a mid-tone in grayscale and the contrast
+   binarizer flips polarity — it paints the chip solid black and knocks the
+   text out as a mangled crosshatch. The preserve-text pass runs ahead of
+   the binarizer: small (`< 4%` of page), high-chroma, low-variance regions
+   that carry dark text strokes get **lifted to white in the gray image**
+   so the dark text reads as crisp black-on-white through the standard
+   binarize path. The "this is a highlight" colour cue is sacrificed —
+   on 1-bit fax it was going to die anyway — and the label survives. Large
+   colour panels and photo content are protected by the area cap and the
+   `~photo` mask; the rescue never touches the photo region. Disable with
+   `--no-preserve-text` if you'd rather keep the chip as a halftoned tone
+   band.
 5. **Pre-clean:** flatten near-white backgrounds to pure white, despeckle, and
    deskew (the photo mask and text masks ride the deskew rotation).
 6. **Build the bilevel page in three layers, composited in this order:**
@@ -209,6 +224,29 @@ over a photographic background; `jarvis`/`stucki`/`sierra` heavier kernels; and
 pipeline runs at square pixels, the screens are isotropic by construction —
 dots stay round on paper without anisotropic correction.
 
+**Generalised AM screen — `--dither screen --dot-shape SHAPE`.** `clustered` is
+one specific spot function; the `screen` family exposes the same machinery with
+selectable dot shape: `round` (default; byte-identical to `clustered`),
+`square` (crisp blocky), `diamond` (the classic newspaper-photo look), or
+`ellipse` (smoother midtone joins, chained vertically). `--screen-angle θ`
+rotates the dot lattice; off-axis angles trade some G4 compression (shorter
+horizontal runs) for the angled-screen aesthetic, and the pipeline logs an
+`off_axis_screen:...` warning for `|θ| > 15°`.
+
+**Crosshatch — `--dither crosshatch`.** Layered angled-line screens lit by tone
+bands, reading as a pen-and-ink etching. Default `--hatch-angles "0,90"` keeps
+transition density close to `line` (compression is *better* than `clustered`
+on most pages because each scanline still ends up mostly horizontal runs).
+Three or four angles read as a denser engraving but multiply the transition
+count along every scanline — the pipeline warns with `crosshatch_dense:...`.
+
+**Mezzotint — `--dither mezzotint` (expressive).** Random-threshold grain — a
+velvety, unstructured stippling. Unlike blue-noise FM, mezzotint enforces no
+inter-dot spacing, so it has maximum 1-bit transition density per row: **poor
+G4 compression and high line-noise sensitivity**. It's not eligible for `auto`
+and trips an `expressive_screen:mezzotint` warning if you opt in. Use it when
+the artistic surface matters more than channel cost.
+
 ### Maximally productive preview — let the user spend their *eye tokens*
 
 Algorithms can rank compression objectively, but **only a human eye can judge
@@ -252,18 +290,18 @@ the BLACK or WHITE text mask — preserving the real letterforms, spacing, and
 tilt. It never pastes a synthetic font.
 
 The same function runs in two scopes — but the **OCR engine itself only
-runs when `--robust-text` is on** (it is the slow step; in default mode the
+runs when `--recover-text` is on** (it is the slow step; in default mode the
 chroma-aware photo segmenter and the adaptive binarizer handle text routing
 without it):
 
-- **`--robust-text`** (default **`off`**) is the master switch — it
+- **`--recover-text`** (default **`off`**) is the master switch — it
   enables the OCR pass. When on it covers text **INSIDE** the image regions
   — signage, captions baked into a photo. Polarity is decided **per sign**
   (words grouped by proximity, one field tone for the whole group), so co-
   located words on the same plate get one consistent treatment. This is
   what brings back the cream "VILLA DEL SOL" lettering on the cyan/gold/
   tan covers even when grayscale flattens it.
-- **`--ocr-text`** (default `auto`) is a sub-switch — when robust-text
+- **`--ocr-text`** (default `auto`) is a sub-switch — when recover-text
   is on, this controls whether the same OCR pass *also* recolours text
   **OUTSIDE** the image regions (the page's header/footer/form text on
   coloured bars). Set it `off` to keep the within-image recolour while
@@ -277,13 +315,13 @@ python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf \
 - **Optional OCR.** Both passes need `rapidocr-onnxruntime` (`pip install
   rapidocr-onnxruntime` — self-contained, no system binary). Without it the
   skill still works: document text falls back to the binarizer's default
-  black-on-white, and the within-image robust pass becomes a no-op.
+  black-on-white, and the within-image recover pass becomes a no-op.
 - **OCR can misread.** Every recoloured word is listed in the summary and
-  report (`robust_text.words` and `ocr_text.words`) with its confidence,
+  report (`recover_text.words` and `ocr_text.words`) with its confidence,
   polarity decision, measured field luminance, and WCAG contrast. **Surface
   these to the user to verify.** Low-confidence words (< `--ocr-conf`, default
   0.5) are dropped.
-- `--robust-text off` disables only the within-image pass; document-text
+- `--recover-text off` disables only the within-image pass; document-text
   polarity stays on (it's nearly always desirable).
 
 ### The 4-panel sample sheet (`--sample N`)
@@ -297,9 +335,9 @@ times. Panels:
    continuous-tone input the 1-bit channel has to approximate.
 3. **HALFTONE on image areas** — bilevel page with halftoning on photo regions
    and document text crisped by the binarizer + OCR-doc-text polarity, but the
-   within-image robust pass turned OFF. This shows what signage looks like when
+   within-image recover pass turned OFF. This shows what signage looks like when
    the channel is left to its own devices.
-4. **HALFTONE + ROBUST TEXT** — the full pipeline, with within-image words
+4. **HALFTONE + RECOVER TEXT** — the full pipeline, with within-image words
    recoloured by the #808080 rule and composited above the halftone.
 
 ```bash
@@ -339,8 +377,8 @@ is the acceptance test**:
   (`--compare-page N`) so the user can spend their *eye tokens* and pick the
   halftone that reads best — the skill highlights its recommended/optimal pick,
   but the human makes the call.
-- When a page has colored signage / brand-colored type, offer the **robust-text
-  before/after** (`--robust-text-preview N`) so the user can confirm the
+- When a page has colored signage / brand-colored type, offer the **recover-text
+  before/after** (`--recover-text-preview N`) so the user can confirm the
   within-image recolor was helpful.
 
 If anything is borderline — small text, faint signatures, muddy photos —

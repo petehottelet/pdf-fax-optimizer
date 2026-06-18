@@ -20,11 +20,29 @@ omitted keys fall back to the documented defaults.
                                   //   strict G3 transmissibility.
 
     // ---- photo halftone schema (continuous-tone regions only) ----
-    "dither": "auto",             // "auto" | "clustered" | "green-noise"
+    "dither": "auto",             // "auto" | "clustered" | "screen" | "green-noise"
                                   //   | "blue-noise" | "atkinson" | "floyd"
                                   //   | "line" (aka "woodcut"/"engraving")
+                                  //   | "crosshatch" (pen-and-ink etching)
                                   //   | "ordered" | "edd" | "jarvis" | "stucki"
-                                  //   | "sierra" | "none"
+                                  //   | "sierra" | "mezzotint" (expressive — bad
+                                  //   G4, opt-in only; `auto` will never pick it)
+                                  //   | "none"
+                                  //   See SCREENS registry in fax_pipeline.py
+                                  //   for the canonical list + aliases.
+    "dot_shape": "round",         // spot function for `dither: "screen"`:
+                                  //   "round"   — same as `clustered` (default)
+                                  //   "square"  — crisp blocky dots
+                                  //   "diamond" — newspaper-photo aesthetic
+                                  //   "ellipse" — smoother midtone joins
+    "screen_angle": 0.0,          // rotate `screen` or `line` by N degrees.
+                                  //   0 keeps fax-friendly horizontal runs; any
+                                  //   angle > |15°| logs an off_axis_screen
+                                  //   warning (shorter runs → larger G4 file).
+    "hatch_angles": [0, 90],      // angle list for `dither: "crosshatch"`.
+                                  //   Two perpendicular angles keep transition
+                                  //   density close to `line`; > 2 angles logs
+                                  //   a crosshatch_dense warning.
     "green_noise_coarseness": 4.0, // green-noise AM<->FM knob ~2 (detail)..8 (robust)
     "tone_curve": "auto",         // per-family dot-gain pre-correction | "none"
     "sharpen": false,             // edge-aware unsharp on photos before halftoning
@@ -37,21 +55,32 @@ omitted keys fall back to the documented defaults.
     "text_in_image": true,        // fallback rescue: where stroke geometry inside
                                   //   the photo region looks like a text line, keep
                                   //   the binarized value instead of the halftone.
-                                  //   The OCR-driven robust_image_text below is the
+                                  //   The OCR-driven recover_text below is the
                                   //   primary path; this is a safety net.
+    "preserve_text": true,        // pre-binarize rescue for dark text on a small
+                                  //   saturated-colour chip ("Active accounts" on a
+                                  //   lime pill, status badge on an orange pill).
+                                  //   The chip is lifted to white in the gray image
+                                  //   so the dark text reads as crisp black-on-white
+                                  //   through the standard binarize path; without it
+                                  //   the chip's mid-tone confuses the contrast
+                                  //   binarizer which flips polarity and shreds the
+                                  //   label. Photos and large colour panels are
+                                  //   protected by an area cap. Set false to keep
+                                  //   the chip as a halftoned tone band.
     "ocr_text": "auto",           // OCR-driven #808080 polarity for text OUTSIDE
                                   //   images (page header/footer/form text). "auto"
                                   //   runs when an OCR engine is available; "off"
                                   //   falls back to the binarizer's default
                                   //   black-on-white. Needs rapidocr-onnxruntime.
-    "robust_image_text": "auto",  // OCR-driven #808080 polarity for text INSIDE
+    "recover_text": "auto",       // OCR-driven #808080 polarity for text INSIDE
                                   //   images (signage, captions baked into a
                                   //   photo). Same engine as ocr_text; recoloured
                                   //   glyphs ride a layer composited ABOVE the
                                   //   halftone so the screen never disturbs them.
                                   //   "off" disables only the within-image pass.
     "ocr_conf_min": 0.5,          // minimum OCR confidence to recolour a word
-    "robust_text_stroke": 0.15,   // (deprecated, retained for back-compat)
+    "recover_text_stroke": 0.15,  // (deprecated, retained for back-compat)
     "segmentation": "embedded",   // "embedded" (use PDF image rects)
                                   //   | "variance" (heuristic for flat scans)
                                   //   | "none" (whole page one strategy)
@@ -70,7 +99,7 @@ omitted keys fall back to the documented defaults.
 ```
 
 > Note: `--compare-page N`, `--compare-methods a,b,c`, `--sample N`, and
-> `--robust-text-preview N` are CLI-only flags, not config keys.
+> `--recover-text-preview N` are CLI-only flags, not config keys.
 
 ## Annotated example — faxing scanned clinical paperwork with a photo
 
@@ -124,7 +153,7 @@ The `report` file (and `--report`) is written as JSON:
                      "field_gray": 250.0, "wcag_contrast": 18.6,
                      "bbox": [x0, y0, x1, y1] } ]
       },
-      "robust_text": {              // text INSIDE images (signage, captions)
+      "recover_text": {             // text INSIDE images (signage, captions)
         "scope": "image",
         "engine": "rapidocr-onnxruntime",
         "words_recognized": 2,
@@ -148,5 +177,5 @@ user. Long per-page transmission times and `inverted_or_heavy_black` are the
 signals to revisit knobs before sending. `doc_text:recolored:*` and
 `image_text:recolored:*` count words the OCR-driven #808080 rule recoloured;
 per-word detail (text, polarity, field luminance, OCR confidence) lives under
-`pages[].ocr_text.words` and `pages[].robust_text.words` respectively. Surface
+`pages[].ocr_text.words` and `pages[].recover_text.words` respectively. Surface
 these word lists to the user so they can verify OCR didn't misread.
