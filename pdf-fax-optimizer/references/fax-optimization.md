@@ -154,6 +154,39 @@ means worse G4 compression, longer transmission, and more line-noise fragility.
 - **Ordered / Bayer (dispersed)** — cheap threshold-map method; between the
   others on both axes. Predictable, fast, no error propagation.
 
+### Optional screens (Phase 1 / Phase 2 — `--dither screen`, `crosshatch`, `mezzotint`)
+
+`clustered` is one specific spot function; `--dither screen` exposes the same
+machinery with a selectable dot shape via `--dot-shape`:
+
+| `--dot-shape` | Look |
+|---|---|
+| `round` (default) | Identical to `clustered` (Euclidean spot, spiral growth). |
+| `square` | Chebyshev spot — crisp blocky dots. |
+| `diamond` | Manhattan spot — classic newspaper-photo aesthetic. |
+| `ellipse` | Anisotropic Euclidean (1:1.7) — chained dots vertically, smoother midtone joins. |
+
+`--screen-angle θ` rotates the dot lattice (also works with `--dither line`).
+0° keeps the fax-friendly horizontal-runs property; off-axis angles `|θ| > 15°`
+emit an `off_axis_screen:` warning because run-length is compromised. The
+threshold tile itself is *not* rotated — the sampling grid is — so there's no
+tile-seam artefact at arbitrary angles.
+
+**`crosshatch`** — layered angled line screens lit by tone bands; reads as
+pen-and-ink etching. `--hatch-angles "0,90"` (the default two perpendicular
+sets) actually compresses *better* than `clustered` on a mixed page because
+every scanline still ends up in long horizontal runs in the upper-band layer.
+More angles (`"0,45,90,135"`) read as a denser engraving but multiply
+transitions — `crosshatch_dense:N_angles` warning.
+
+**`mezzotint`** — random-threshold (no spatial coherence) grain. Velvety
+unstructured stippling, visually distinct from blue-noise FM (which is
+*engineered* to avoid low-frequency clumping). Because ranks are uncorrelated
+spatially, transition density is maximal per row and G4 size is roughly 5× a
+clustered screen on the same photo. Not eligible for `auto`; opting in trips
+an `expressive_screen:mezzotint` warning. Use it when the artistic surface
+matters more than channel cost.
+
 **Square pixels.** Because the pipeline renders at square pixels (§2), screens
 are isotropic by construction — dots are round on paper without any anisotropic
 threshold-tile correction. The legacy aniso-tile helper is now an identity
@@ -252,6 +285,27 @@ to the right converter.
   binarized value instead of the screen. It is conservative by design — it would
   rather miss faint text than carve harsh blobs out of ordinary photo detail —
   and is on by default (`--no-text-in-image` to disable).
+- **Text on a coloured "highlight pill"** → lifted to white before binarization.
+  Slide decks, dashboards, and forms routinely place dark labels inside a
+  saturated colour chip (a "Pipeline growth" label on a lime pill, a status
+  badge on an orange pill, a glossary tag on a cyan pill, …). In the original
+  page the contrast is fine — bright chip, dark text. After RGB→gray demotion
+  the bright fill collapses to a mid-tone (~140 luma), and dark text on a
+  dark-ish field has too little contrast to survive: the contrast binarizer
+  sees the pill as "dark field with light text", flips polarity, paints the
+  chip solid black, and knocks the glyphs out as a mangled crosshatch — the
+  label is effectively illegible. `preserve_text_mask` runs before
+  the binarizer: connected components that satisfy *all three* of (a) high
+  chroma in the source RGB, (b) area below ~4% of the page, and (c) a dark-
+  pixel density in the text-stroke band (4 – 50%) get **lifted to white in the
+  gray image** (and in the RGB the OCR pass would see, so an enabled recover-
+  text pass agrees on the field tone). The pill loses its colour cue — there
+  is no way to keep that on a 1-bit channel — but the dark text now reads as
+  clean black-on-white through the standard binarize path. Large coloured
+  panels and full-page photo content are protected by the area cap and the
+  `~photo` AND-mask; the rescue never touches the photo region. Default on;
+  disable with `--no-preserve-text` when you'd rather keep the chip as a
+  halftoned tone band (e.g. a stencil-print look).
 
 The pipeline detects photo regions from the PDF's **embedded raster image
 rectangles** (`page.get_image_rects`) rather than guessing from pixels — robust,
@@ -294,7 +348,7 @@ Bilevel + low dpi quietly kills fine detail, so the pipeline actively defends it
     header/footer/form text. Rescues white-on-coloured headers, body text on
     tinted blocks, and any place where the binarizer's default polarity would
     flip the wrong way.
-  - **Image text (INSIDE images, `--robust-text`)** — signage, captions baked
+  - **Image text (INSIDE images, `--recover-text`)** — signage, captions baked
     into a photo. Polarity is decided **per sign** (words grouped by
     proximity), so co-located words on the same plate get one consistent
     treatment.
@@ -308,13 +362,13 @@ Bilevel + low dpi quietly kills fine detail, so the pipeline actively defends it
   The recoloured glyphs ride a **text layer composited ABOVE** the halftoned
   image layer, so the halftone screen can never disturb a glyph. There is no
   field-lift, no field-darken, no stroke backing — the layered composite makes
-  those obsolete. Every recoloured word is reported under `robust_text.words` /
-  `ocr_text.words` with its confidence, polarity decision, and field
+  those obsolete. Every recoloured word is reported under `recover_text.words`
+  / `ocr_text.words` with its confidence, polarity decision, and field
   luminance, so the user can verify (OCR can misread).
 
   Without OCR (`rapidocr-onnxruntime` not installed) the skill still works —
   document text falls back to the binarizer's default black-on-white, the
-  within-image robust pass becomes a no-op, and the rest of the pipeline is
+  within-image recover pass becomes a no-op, and the rest of the pipeline is
   unchanged.
 
 ---
@@ -365,12 +419,13 @@ The output should be cheap and robust to send, not just small on disk:
 | `--text-binarize` | `contrast` | Binarizer for text/line content; `contrast` forces gray/light text to solid black; also sauvola, niblack, wolf, bradley, otsu (§4) |
 | `--tone-curve` | `auto` | Per-family dot-gain pre-correction so photos don't plug to black (§3) |
 | `--sharpen` | off | Edge-aware unsharp on photo regions before halftoning (§3) |
-| `--no-text-in-image` | (rescue on) | Disable fallback rescue of text baked into photos (§4); the OCR-driven `--robust-text` is the primary path |
+| `--no-text-in-image` | (rescue on) | Disable fallback rescue of text baked into photos (§4); the OCR-driven `--recover-text` is the primary path |
+| `--no-preserve-text` | (rescue on) | Disable the preserve-text rescue (§4) — small saturated-colour chips carrying dark text are normally lifted to white so the binarizer prints the label crisply; this flag keeps the chip as a halftoned tone band instead |
 | `--ocr-text` | `auto` | OCR-driven #808080 polarity for text OUTSIDE images (page header/footer/form text); `off` falls back to the binarizer (§5) |
-| `--robust-text` | `auto` | OCR-driven #808080 polarity for text INSIDE images (signage, captions); `off` disables (§5) |
+| `--recover-text` | `auto` | OCR-driven #808080 polarity for text INSIDE images (signage, captions); `off` disables (§5) |
 | `--ocr-conf` | `0.5` | Minimum OCR confidence to recolour a word |
-| `--sample` | none | Write a 4-panel preview: original / grayscale / halftone-only / halftone+robust-text |
-| `--robust-text-preview` | none | Side-by-side PNG faxed WITHOUT vs WITH the within-image robust recolor (§5) |
+| `--sample` | none | Write a 4-panel preview: original / grayscale / halftone-only / halftone+recover-text |
+| `--recover-text-preview` | none | Side-by-side PNG faxed WITHOUT vs WITH the within-image recover recolor (§5) |
 | `--compare-page` | none | Render the curated 6-up of schemas to one contact sheet so a human can pick by eye (§3) |
 | `--compare-original` | off | Lead the sheet with original-color (#1) + true-grayscale (#2) references, then four halftones |
 | `--compare-methods` | curated | Override which schemas appear in the comparison |
@@ -405,7 +460,7 @@ The output should be cheap and robust to send, not just small on disk:
   LibreOffice is optional and only needed for those office formats; everything
   downstream is unchanged because it always sees a PDF.
 - **rapidocr-onnxruntime** is the optional OCR backend that drives the
-  #808080 polarity passes (`--ocr-text`, `--robust-text`). It bundles its own
+  #808080 polarity passes (`--ocr-text`, `--recover-text`). It bundles its own
   ONNX models, no system OCR binary required. When absent the skill silently
   falls back to the binarizer's default black-on-white.
 - **Leptonica** (not installed here) is the production-grade choice for

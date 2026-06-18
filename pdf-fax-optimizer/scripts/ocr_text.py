@@ -1,6 +1,6 @@
 """Optional OCR backend for the fax optimizer.
 
-`robust_image_text` rescues text baked into a photo at the *signal* level — it
+`recover_text` rescues text baked into a photo at the *signal* level — it
 preserves whatever contrast survives. But text in a sign's specular highlight can
 have near-zero luminance AND chroma contrast in the rendered grayscale, so there
 is nothing to rescue. The *colour* image often still holds enough signal for a

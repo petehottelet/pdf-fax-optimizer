@@ -59,7 +59,7 @@ The `SKILL.md` format is an open standard. This skill is built and tested for
   halftone, document text goes to an adaptive binarizer, with a guard for
   full-page rasters so the document's own text never gets dithered.
 - **OCR-driven text recolor** (default on): `rapidocr-onnxruntime` locates
-  every word — outside images (`--ocr-text`) and, with `--robust-text`, inside
+  every word — outside images (`--ocr-text`) and, with `--recover-text`, inside
   images — and the pipeline marks each word BLACK or WHITE by the **#808080
   rule** (median field luma < 128 → WHITE; ≥ 128 → BLACK). The recoloured
   glyphs ride a layer composited **above** the halftone, so the screen can
@@ -75,7 +75,7 @@ The `SKILL.md` format is an open standard. This skill is built and tested for
 - Produces a JSON report with **estimated transmission time per page**, every
   recoloured word and its polarity, and legibility/inversion warnings — plus
   `--sample N` for a 4-panel preview sheet (original / grayscale /
-  halftone-only / halftone+robust-text).
+  halftone-only / halftone+recover-text).
 
 ## Optimizing for the channel, not "fax-ifying" the document
 
@@ -108,9 +108,9 @@ the **#808080 rule** — and never lets the halftone touch a glyph:
 
 1. **Locate every word.** OCR (`rapidocr-onnxruntime`) finds words in two
    scopes: OUTSIDE the image regions (`--ocr-text` — the page's
-   header/footer/form text) and, with `--robust-text`, INSIDE the image regions
-   (signage, captions). OCR is the locator only; if the engine isn't installed
-   the skill falls back to the binarizer's default black-on-white.
+   header/footer/form text) and, with `--recover-text`, INSIDE the image
+   regions (signage, captions). OCR is the locator only; if the engine isn't
+   installed the skill falls back to the binarizer's default black-on-white.
 2. **Segment the original glyph pixels.** Each word's OCR box is used to crop;
    glyphs are split from their field using the box's border ring (definitely
    field) — robust where a blind 2-means split would invert. The real
@@ -249,10 +249,10 @@ retain the intermediate PDF next to the output.
   (`pip install -r requirements.txt`). `requests` is also installed, needed only
   to **send** faxes.
 - **`rapidocr-onnxruntime`** (optional but recommended) — drives the OCR-based
-  #808080 polarity passes (`--ocr-text` and `--robust-text`). Self-contained
+  #808080 polarity passes (`--ocr-text` and `--recover-text`). Self-contained
   (bundled ONNX models, no system OCR binary). Without it the skill still
   works: document text falls back to the binarizer's default black-on-white
-  and the within-image robust pass is silently skipped.
+  and the within-image recover pass is silently skipped.
 - **No CLI tools required** for PDF/image input. (qpdf / Ghostscript are optional
   and only useful for unrelated PDF work.)
 - **LibreOffice** (optional) — only needed to fax **Office/OpenDocument** input
