@@ -224,20 +224,6 @@ crisply against either side of the halftoned billboard:
   <img src="docs/compare_example.png" alt="Six-panel fax comparison showing original color, true grayscale washing out the gold sign text into the dark billboard background, and four fax halftone treatments with the OCR-recovered sign text knocked out to white above each halftone screen so it reads crisply on the dark billboard" width="100%">
 </p>
 
-### Inspect before sending — `--sample N` and the auto-picker's reasoning
-
-The 4-panel `--sample N` diagnostic emits a single PNG that shows the
-**original**, a true **grayscale** of it, the **standard fax baseline**, and
-the **optimized output** side by side, so you can confirm legibility before
-transmitting. The bottom row makes the auto-picker's reasoning visible: a
-naive Otsu fax loses every photo, the auto-picked Floyd ED pass keeps text
-and photo, and `--fax-heavy` falls back to a compression-priority clustered
-screen when bytes-on-the-wire matter more than photo detail.
-
-<p align="center">
-  <img src="docs/readme/features.png" alt="Other built-in features — the --sample 4-panel diagnostic and a side-by-side of basic Otsu vs the OPTIMAL Floyd ED auto-pick vs --fax-heavy compression mode" width="100%">
-</p>
-
 ## Input formats — fax a PDF, or a Word, PowerPoint, Excel, or image file
 
 You don't have to start from a PDF. Point the optimizer at common office and
