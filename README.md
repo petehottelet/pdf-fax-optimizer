@@ -156,6 +156,15 @@ construction — dots stay round on paper without any anisotropic correction.
 (`ordered`, `edd` edge-enhancing diffusion, `jarvis`, `stucki`, `sierra`, and
 `none`/threshold are also selectable.)
 
+Every screen in the registry, applied to the same letter cover sheet —
+**`floyd`, `jarvis`, and `edd` are highlighted as the OPTIMAL picks** for a
+forms-and-photo page like this one (preserve fine document text, hold
+photographic detail in the masthead, keep edge sharpness on the billboard):
+
+<p align="center">
+  <img src="docs/readme/halftone_grid.png" alt="Halftone style contact sheet — every screen in the registry applied to the same Prestige Estates cover sheet, with floyd / jarvis / edd marked OPTIMAL for a forms-and-photo page" width="100%">
+</p>
+
 Compression can be ranked by a machine, but **readability can't** — only a human
 eye can decide whether a halftone "reads." So `--compare-page N` renders one page
 through the curated **6-up** of methods into a single labeled **contact sheet**,
@@ -178,17 +187,49 @@ python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
 
 ### Text That Survives the Fax
 
-The OCR-driven #808080 rule keeps every word on the page legible — outside
-images (page header/footer/form text) and inside images (signage, captions
-baked into a photo). Each word's ORIGINAL glyph pixels are recoloured BLACK on
-a light/mid field or WHITE on a dark field, then composited **above** the
-halftone so the screen never disturbs them. In the comparison below, watch the
-**VILLA DEL SOL** sign: readable in the color original, washed out in the
-true-grayscale reference, and brought back to solid black on the cyan/gold/tan
-covers because OCR finds the words and the #808080 rule paints them.
+Two layered passes protect text against the 1-bit channel. Both are on by
+default and the report lists everything they touched so you can verify.
+
+**`preserve_text` — dark text on any colored fill (no OCR needed).** Slide
+labels on highlight chips, dashboard status badges, colored table cells,
+tinted callout boxes, color-filled banners — anywhere dark text sits on a
+saturated-colour background. In grayscale those fills collapse to mid-tone
+luma and the contrast binarizer flips polarity, painting the fill solid
+black and knocking the label out as a mangled crosshatch. The `preserve_text`
+pass runs ahead of the binarizer: small high-chroma regions that carry dark
+text strokes get **lifted to white in the gray image** so the dark text reads
+as crisp black-on-white. Disable with `--no-preserve-text`.
+
+**`recover_text` — OCR-driven #808080 polarity for text inside photos.** OCR
+locates every word inside the photo region; each word's ORIGINAL glyph pixels
+are recoloured BLACK on a light/mid field or WHITE on a dark field by the
+#808080 rule, then composited **above** the halftone so the screen never
+disturbs them. Opt in with `--recover-text on`.
+
+<p align="center">
+  <img src="docs/readme/text_rescue.png" alt="Text rescue features — top row: preserve_text whitens colored highlight chips so dark labels read cleanly through the 1-bit threshold; bottom row: recover_text OCRs text baked into the halftoned billboard and recolors it BLACK or WHITE by the #808080 rule" width="100%">
+</p>
+
+A deeper recover_text demo — the same **VILLA DEL SOL** billboard rendered
+through six halftone choices, with the OCR'd sign text painted in solid black
+above each halftone screen:
 
 <p align="center">
   <img src="docs/compare_example.png" alt="Six-panel fax comparison showing original color, true grayscale washing out the colored sign text, and four fax halftone treatments with the text rescued to solid black" width="100%">
+</p>
+
+### Inspect before sending — `--sample N` and the auto-picker's reasoning
+
+The 4-panel `--sample N` diagnostic emits a single PNG that shows the
+**original**, a true **grayscale** of it, the **standard fax baseline**, and
+the **optimized output** side by side, so you can confirm legibility before
+transmitting. The bottom row makes the auto-picker's reasoning visible: a
+naive Otsu fax loses every photo, the auto-picked Floyd ED pass keeps text
+and photo, and `--fax-heavy` falls back to a compression-priority clustered
+screen when bytes-on-the-wire matter more than photo detail.
+
+<p align="center">
+  <img src="docs/readme/features.png" alt="Other built-in features — the --sample 4-panel diagnostic and a side-by-side of basic Otsu vs the OPTIMAL Floyd ED auto-pick vs --fax-heavy compression mode" width="100%">
 </p>
 
 ## Input formats — fax a PDF, or a Word, PowerPoint, Excel, or image file
