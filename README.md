@@ -165,13 +165,16 @@ photographic detail in the masthead, keep edge sharpness on the billboard):
   <img src="docs/readme/halftone_grid.png" alt="Halftone style contact sheet — every screen in the registry applied to the same Prestige Estates cover sheet, with floyd / jarvis / edd marked OPTIMAL for a forms-and-photo page" width="100%">
 </p>
 
-Compression can be ranked by a machine, but **readability can't** — only a human
-eye can decide whether a halftone "reads." So `--compare-page N` renders one page
-through the curated **6-up** of methods into a single labeled **contact sheet**,
-each panel annotated with its real G4 size and transmission estimate, with the
-recommended pick highlighted. The skill **suggests the optimal** method from the
-page's content, and you **choose the optimal** by spending your *eye tokens* on
-the contact sheet — then re-run with the chosen `--dither` for the final file.
+That grid above is the whole catalogue. For picking by eye on your own document
+you don't need all 17 — compression can be ranked by a machine, but **readability
+can't**, and you can't read 17 thumbnails in parallel. So `--compare-page N`
+renders one page of your file through a **curated 6-up subset** of those screens
+(`clustered`, `green-noise`, `blue-noise`, `atkinson`, `floyd`, `line` — one
+representative per family) into a single labeled **contact sheet**, each panel
+annotated with its real G4 size and transmission estimate and the recommended
+pick highlighted. The skill **suggests the optimal** method from the page's
+content, and you **choose the optimal** by spending your *eye tokens* on the
+contact sheet — then re-run with the chosen `--dither` for the final file.
 
 ```bash
 python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
