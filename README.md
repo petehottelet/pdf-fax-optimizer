@@ -225,17 +225,6 @@ disturbs them. Opt in with `--recover-text on`.
   <img src="docs/readme/text_rescue.png" alt="Text rescue features — top row: preserve_text whitens colored highlight chips so dark labels read cleanly through the 1-bit threshold; bottom row: recover_text OCRs text baked into the halftoned billboard and recolors it BLACK or WHITE by the #808080 rule" width="100%">
 </p>
 
-A deeper recover_text demo — the same **VILLA DEL SOL** billboard rendered
-through six halftone choices, with the OCR'd gold sign text **knocked out to
-white** above each halftone screen. The polarity is content-driven: the
-#808080 luma rule paints recovered glyphs **black** when they sit on light
-backgrounds and **white** when they sit on dark ones, so the sign text reads
-crisply against either side of the halftoned billboard:
-
-<p align="center">
-  <img src="docs/compare_example.png" alt="Six-panel fax comparison showing original color, true grayscale washing out the gold sign text into the dark billboard background, and four fax halftone treatments with the OCR-recovered sign text knocked out to white above each halftone screen so it reads crisply on the dark billboard" width="100%">
-</p>
-
 ## Input formats — fax a PDF, or a Word, PowerPoint, Excel, or image file
 
 You don't have to start from a PDF. Point the optimizer at common office and
