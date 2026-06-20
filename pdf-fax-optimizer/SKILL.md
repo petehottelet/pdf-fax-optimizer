@@ -9,7 +9,7 @@ description: >-
   photos, or send a fax. Triggers: "fax this Word doc", "prep these scans to
   fax", "send this as a fax".
 compatibility: >-
-  Requires Python 3 with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
+  Requires Python 3.10+ with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
   img2pdf. Sending a fax additionally needs the requests package; faxing
   Office/OpenDocument files (Word/PowerPoint/Excel) needs LibreOffice (headless);
   the OCR-driven text-polarity passes (--ocr-text and --recover-text) need
@@ -188,7 +188,7 @@ a fax": keep text vector-crisp, render photos so they stay recognizable, and
 spend bits where they buy legibility. The halftone/binarization *schema* is the
 control surface for that — pick it deliberately.
 
-### Halftone schemas (the curated 6-up)
+### Halftone schemas (the curated comparison)
 
 A continuous-tone photo can't exist in 1-bit fax; it must be *simulated* with
 patterns of black dots. The schema chosen is the single biggest lever on how a
@@ -202,16 +202,19 @@ fragility). The skill ships six front-line schemas spanning the design space
    line**; lowest apparent resolution. The default for `--fax-heavy`.
 2. **`green-noise`** — hybrid AM–FM screening. Mid-size dot clusters give
    **blue-noise detail with clustered-dot run-length and robustness**; tune with
-   `--green-noise-coarseness` (~2 detail … 8 robust). The `auto` pick for a
-   moderate photo that must survive a real line.
+   `--green-noise-coarseness` (~2 detail … 8 robust). The `auto` picker's
+   balanced fallback for moderate photo content; the picker chooses other
+   members of the detail family — `floyd`/`jarvis`/`edd`/`atkinson`/`clustered`
+   — when the page's content (mean/std luma, edge density, bimodality, fine
+   texture) signals a clearer match.
 3. **`blue-noise`** — void-and-cluster FM screening. Isotropic, organic stipple
    with **no directional "worms"**; excellent perceived detail, middling
    compression.
 4. **`atkinson`** — Atkinson error diffusion. Clean whites and crisp thin
    features; good detail, looser compression than screening.
 5. **`floyd`** — Floyd–Steinberg error diffusion. The classic; **maximum
-   detail**, but its dispersed speckle is the **worst case for G4 size** and the
-   most fragile over a bad line.
+   detail**, and its dispersed fine-grain speckle is the richest signal to
+   carry over the channel — more bytes shipped, more fidelity preserved.
 6. **`line`** (aliases `woodcut`/`engraving`) — horizontal line screen. Tone
    becomes horizontal stripes that **thicken with darkness**; because the strokes
    run *along the scanline* it produces almost entirely long runs → **G4 size and
@@ -252,27 +255,32 @@ the artistic surface matters more than channel cost.
 
 Algorithms can rank compression objectively, but **only a human eye can judge
 "does this read?"** So don't just pick silently — generate a side-by-side
-**comparison contact sheet** and let the user spend their *eye tokens* on the
-real, encoded output:
+**contact sheet** with `--sample N --panels K` and let the user spend their
+*eye tokens* on the real, encoded output:
 
 ```bash
 python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf \
-    --fax-resolution fine --compare-page 1 --report OUTPUT.report.json
+    --fax-resolution fine --sample 1 --panels 6 --report OUTPUT.report.json
 ```
 
-`--compare-page N` renders that page through the curated 6-up of halftone methods
-into one labeled PNG (`OUTPUT.compare_pN.png`), each panel annotated with its
-**actual G4 size and estimated transmission time**, and the **OPTIMAL pick
-highlighted**.
+`--sample N --panels K` renders that page through K side-by-side panels into
+one labeled PNG (`OUTPUT.sample_pN.png`), each panel annotated with its
+**actual G4 size and estimated transmission time**, with the **auto-pick
+highlighted** and a 3-line **settings header** at the top documenting the
+exact options used. `--panels` accepts 1, 2, 4 *(default)*, 6, 8, 12, or 20
+(`max`); each higher count is a strict superset of the smaller ones, so it's
+a clean detail dial — from "preview the optimal" (2 panels) to "compare a
+representative subset" (6 panels) to "every halftone screen in the registry"
+(20 panels).
+
 The skill therefore does both jobs the user asked for: (a) it **suggests the
 optimal** method from the page's content (photo fraction, fax-heavy, line
 condition), and (b) it lets the user **choose the optimal** by eye from the
-contact sheet. Add `--compare-original` to lead the sheet with two reference
-panels — the original in color (#1) and a true grayscale of it (#2) — followed
-by four halftones, so the viewer can see exactly what each schema is
-approximating. Offer this whenever a fax has meaningful photo content — then
-re-run with the chosen `--dither` for the final file. (Use `--compare-methods`
-to override which methods appear.)
+contact sheet. Offer this whenever a fax has meaningful photo content — then
+re-run with the chosen `--dither` for the final file. The legacy
+`--compare-page` and `--preview-page` flags still work for backward
+compatibility, but `--sample --panels` covers the same ground with one
+unified surface.
 
 ### Text recolor by the #808080 rule (OCR-driven)
 
@@ -325,29 +333,45 @@ python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf \
 - `--recover-text off` disables only the within-image pass; document-text
   polarity stays on (it's nearly always desirable).
 
-### The 4-panel sample sheet (`--sample N`)
+### The sample contact sheet (`--sample N [--panels K]`)
 
-`--sample N` writes a labeled 4-panel preview so the recolor and halftone
-effects can be inspected side by side, without re-running the pipeline four
-times. Panels:
+`--sample N` writes a labelled contact sheet so the user can confirm the
+output is legible before sending. The default 4-panel layout is:
 
 1. **ORIGINAL** — the source page in colour, untouched.
-2. **GRAYSCALE** — the same page desaturated, no other processing. The
-   continuous-tone input the 1-bit channel has to approximate.
-3. **HALFTONE on image areas** — bilevel page with halftoning on photo regions
-   and document text crisped by the binarizer + OCR-doc-text polarity, but the
-   within-image recover pass turned OFF. This shows what signage looks like when
-   the channel is left to its own devices.
-4. **HALFTONE + RECOVER TEXT** — the full pipeline, with within-image words
-   recoloured by the #808080 rule and composited above the halftone.
+2. **TRUE GRAYSCALE** — the same page desaturated; the continuous-tone input
+   the 1-bit channel has to approximate.
+3. **DEFAULT FAX (Otsu)** — bare-minimum bilevel (basic mode: no MRC / OCR /
+   halftone). The "naive fax" baseline the optimizations improve on.
+4. **RECOMMENDED (auto-pick)** — full pipeline with the auto-picker's
+   recommended dither. The green border + `>> RECOMMENDED <<` badge marks the
+   skill's suggestion for this page.
+
+Use `--panels K` to ask for 1, 2, 6, 8, 12, or 20 (`max`) panels — every
+higher count is a strict superset of the smaller ones:
+
+- `--panels 1` — just the optimized output (replaces the old `--preview-page`)
+- `--panels 2` — original + recommended (minimal "before / after")
+- `--panels 6` — adds two representative halftones for a quick side-by-side
+- `--panels 20` (or `max`) — every screen in the SCREENS registry on YOUR
+  page (the full catalogue, same layout as `docs/readme/halftone_grid.png`)
 
 ```bash
 python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf --sample 1
 # writes cover.fax.sample_p1.png
+
+python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf --sample 3 --panels max
+# 20-panel "every halftone screen" sheet for page 3 of a multi-page deck
+
+python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf --sample 1 \
+    --sample-include orig,gray,clustered,floyd,line   # custom recipe
 ```
 
-Panels 3 and 4 are rendered with the user's actual options, so the sheet is a
-faithful preview of the real fax — not an artificial demo.
+Each fax panel is rendered with the user's actual options (preserve_text,
+ocr_text, recover_text, etc.) so the sheet is a faithful preview of the real
+fax. A 3-line **settings header** at the top documents which options
+produced the sheet — saved PNGs stay self-describing weeks later. Pass
+`--no-sample-header` to omit it.
 
 ### Special content checks
 
@@ -368,16 +392,17 @@ Always finish by telling the user the output path(s), the total pages +
 estimated transmission time, and any warnings the report flagged. **Legibility
 is the acceptance test**:
 
-- For a single rendering, offer a **preview** of the actual bilevel output
-  (`--preview-page N` writes a PNG of exactly what will be transmitted).
-- For an at-a-glance overview, offer the **4-panel sample sheet** (`--sample N`)
-  showing original, grayscale, halftone-only, and full-pipeline side by side.
-  This is the fastest way to confirm aspect ratio, that the halftone is on
-  image areas only, and that the recoloured text reads.
-- When there's real photo content, offer the **comparison contact sheet**
-  (`--compare-page N`) so the user can spend their *eye tokens* and pick the
-  halftone that reads best — the skill highlights its recommended/optimal pick,
-  but the human makes the call.
+- For an at-a-glance overview, offer the **4-panel sample sheet**
+  (`--sample N`) showing original / grayscale / default fax / recommended
+  side by side. This is the fastest way to confirm aspect ratio, that the
+  halftone is on image areas only, and that the recommended pick reads.
+- For a single-panel preview of the exact bytes that will transmit, use
+  `--sample N --panels 1` (which replaces the old `--preview-page`).
+- When there's real photo content and the user wants to choose between
+  halftone schemes, ask for more panels: `--sample N --panels 6` for a
+  curated comparison, `--panels 12` or `--panels max` (=20) for a full
+  catalogue. The skill highlights its recommended/optimal pick on every
+  sheet, but the human makes the final call by eye.
 - When a page has colored signage / brand-colored type, offer the **recover-text
   before/after** (`--recover-text-preview N`) so the user can confirm the
   within-image recolor was helpful.

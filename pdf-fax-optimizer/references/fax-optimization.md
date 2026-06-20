@@ -105,14 +105,21 @@ means worse G4 compression, longer transmission, and more line-noise fragility.
 
 ### The top 5 (what the skill ships)
 
-| Schema (`--dither`) | Family | Detail | G4 size | Noise robustness |
+"Detail" is how much fine information the screen carries. "G4 size" is how
+many bytes the resulting bilevel page encodes to over G4 — a richer screen
+ships more bytes but carries more of what was on the source. "Channel
+character" is the *kind of trace* the screen leaves on the line: long-run AM
+strokes survive line noise cleanly, fine-grain FM stipple holds photographic
+detail, error-diffusion kernels diffuse tone with their own signature.
+
+| Schema (`--dither`) | Family | Detail | G4 size | Channel character |
 |---|---|---|---|---|
-| `clustered` | AM screening (clustered-dot) | low–med | **best** | **best** |
-| `green-noise` | hybrid AM–FM (clustered FM) | med–high | good | good |
-| `blue-noise` | FM screening (void-and-cluster) | **high** | medium | medium |
-| `atkinson` | error diffusion (6/8) | high | med | low–med |
-| `floyd` | error diffusion | **highest** | **worst** | **worst** |
-| `line` (`woodcut`) | horizontal line screen (AM, 1-D) | med | **best** | **best** |
+| `clustered` | AM screening (clustered-dot) | low–med | minimal | long-run, line-tolerant |
+| `green-noise` | hybrid AM–FM (clustered FM) | med–high | low–med | hybrid stipple/cluster — balanced |
+| `blue-noise` | FM screening (void-and-cluster) | **high** | medium | isotropic fine-grain stipple |
+| `atkinson` | error diffusion (6/8) | high | med | sparse stipple, clean whites |
+| `floyd` | error diffusion | **highest** | rich | fine-grain, detail-first |
+| `line` (`woodcut`) | horizontal line screen (AM, 1-D) | med | minimal | scanline-aligned stripes |
 
 - **Clustered-dot (AM) screening** — like newsprint. Dots grow in clusters, so
   runs are long and compression is far better; it survives transmission and
@@ -230,9 +237,11 @@ The pipeline scales the clustered cell size from the target dpi for this reason.
 
 Compression metrics are objective; *readability* is not. Only a human eye can
 decide whether a given halftone "reads" for a given document. So the skill can
-render one page through all five methods into a single labeled **contact sheet**
-(`--compare-page N` → `OUTPUT.compare_pN.png`), each panel annotated with its
-real G4 size and transmission estimate, with the recommended pick highlighted.
+render one page through K side-by-side panels into a single labeled
+**contact sheet** (`--sample N --panels K` → `OUTPUT.sample_pN.png`; default
+K=4, max K=20 covering every screen in the registry), each panel annotated
+with its real G4 size and transmission estimate, with the recommended pick
+highlighted and a 3-line settings header at the top documenting the run.
 The agent suggests the optimal method; the user spends their **eye tokens** to
 confirm or override it, then the final file is produced with the chosen
 `--dither`. Use `--compare-methods a,b,c` to control which methods appear.
@@ -414,9 +423,11 @@ The output should be cheap and robust to send, not just small on disk:
   for the contrast + thickening logic in §5.
 - **Already-bilevel input** — detect (image is already 1-bit / two-tone) and skip
   reprocessing so you don't dither a clean bitmap into noise.
-- **Preview before send.** `--preview-page N` writes a PNG of exactly the
-  bilevel output that will be transmitted. Always offer this for fax jobs; it's
-  the cheapest insurance against faxing something unreadable.
+- **Preview before send.** `--sample N --panels 1` writes a PNG of exactly the
+  bilevel output that will be transmitted (the legacy `--preview-page N` flag
+  still works). Always offer this for fax jobs; it's the cheapest insurance
+  against faxing something unreadable. For a layered "before / after" with the
+  recommendation marked, use `--panels 2`.
 
 ---
 
@@ -436,11 +447,14 @@ The output should be cheap and robust to send, not just small on disk:
 | `--ocr-text` | `auto` | OCR-driven #808080 polarity for text OUTSIDE images (page header/footer/form text); `off` falls back to the binarizer (§5) |
 | `--recover-text` | `auto` | OCR-driven #808080 polarity for text INSIDE images (signage, captions); `off` disables (§5) |
 | `--ocr-conf` | `0.5` | Minimum OCR confidence to recolour a word |
-| `--sample` | none | Write a 4-panel preview: original / grayscale / halftone-only / halftone+recover-text |
+| `--sample` | none | Write a labelled contact sheet for the page. Default 4 panels (original / grayscale / default fax / recommended); use `--panels K` for 1, 2, 6, 8, 12, 20 (`max`) panels (§3) |
+| `--panels` | 4 | Number of panels emitted by `--sample` (1, 2, 4, 6, 8, 12, 20, or `max`) |
+| `--sample-include` | recipe | Comma-separated panel content keys for a custom `--sample` recipe; overrides `--panels`. Keys: `orig`, `gray`, `default_fax`, `optimized`, `recommended`, or any dither name (incl. `screen-{square,diamond,ellipse}`) |
+| `--no-sample-header` | off | Omit the 3-line settings-header strip above the sample grid |
 | `--recover-text-preview` | none | Side-by-side PNG faxed WITHOUT vs WITH the within-image recover recolor (§5) |
-| `--compare-page` | none | Render the curated 6-up of schemas to one contact sheet so a human can pick by eye (§3) |
-| `--compare-original` | off | Lead the sheet with original-color (#1) + true-grayscale (#2) references, then four halftones |
-| `--compare-methods` | curated | Override which schemas appear in the comparison |
+| `--compare-page` | none | (legacy) Render the curated 6-up of schemas to one contact sheet — equivalent to `--sample N --panels 6` |
+| `--compare-original` | off | (legacy) Lead the sheet with original-color (#1) + true-grayscale (#2) references |
+| `--compare-methods` | curated | (legacy) Override which schemas appear in the `--compare-page` comparison |
 | `--fax-heavy` | off | Bias to clustered: compresses + survives noisy lines |
 | `--segmentation` | `embedded` | MRC routing; `variance` for flattened scans |
 | `--thicken` | off | Save hairlines/small fonts from vanishing (§5) |
@@ -449,7 +463,7 @@ The output should be cheap and robust to send, not just small on disk:
 | `--deskew` | on | Straighten runs; improve compression + legibility |
 | `--format` | `pdf` | `tiff` emits Class-F fax-ready multipage G4 |
 | `--line-rate` | `14400` | Transmission-time estimate basis (§6) |
-| `--preview-page` | none | Inspect actual bilevel output before sending |
+| `--preview-page` | none | (legacy) Inspect actual bilevel output before sending — equivalent to `--sample N --panels 1` |
 
 ---
 
