@@ -3,7 +3,8 @@
 Once a file is fax-optimized (1-bit CCITT-G4 PDF/TIFF), you can transmit it with
 a cloud fax API instead of a physical machine. The provider runs the analog/T.38
 side, so you need only an API key and the recipient number in **E.164** format
-(e.g. `+14155551234`). Use `scripts/send_fax.py`, or `optimize_pdf.py --send` to
+(e.g. `+14155551234`). Use `pdf-fax-send` (the installed console script, or
+`python3 -m pdf_fax_optimizer.send_fax`), or `pdf-fax-optimizer ... --send` to
 optimize and transmit in one step.
 
 > **Always pass credentials via environment variables**, not on the command
@@ -22,9 +23,9 @@ optimize and transmit in one step.
 
 ```bash
 export MFAX_API_KEY=sk_live_xxx
-python3 scripts/send_fax.py output.fax.pdf --provider mfax --to +14155551234
+python3 -m pdf_fax_optimizer.send_fax output.fax.pdf --provider mfax --to +14155551234
 # with a cover page:
-python3 scripts/send_fax.py output.fax.pdf --provider mfax --to +14155551234 \
+python3 -m pdf_fax_optimizer.send_fax output.fax.pdf --provider mfax --to +14155551234 \
     --cover-page --recipient-name "Dr. Lee" --subject "Intake" --notes "2 pages"
 ```
 
@@ -37,7 +38,7 @@ python3 scripts/send_fax.py output.fax.pdf --provider mfax --to +14155551234 \
 
 ```bash
 export PHAXIO_API_KEY=xxx PHAXIO_API_SECRET=yyy
-python3 scripts/send_fax.py output.fax.pdf --provider phaxio --to +14155551234
+python3 -m pdf_fax_optimizer.send_fax output.fax.pdf --provider phaxio --to +14155551234
 ```
 
 ## Any other provider  (`--provider generic`)
@@ -47,7 +48,7 @@ endpoint, auth, and field names to match the provider's docs.
 
 ```bash
 # Bearer-token API that takes `fax_number` + `document` multipart fields:
-python3 scripts/send_fax.py output.fax.pdf --provider generic \
+python3 -m pdf_fax_optimizer.send_fax output.fax.pdf --provider generic \
     --url https://api.example.com/v1/faxes \
     --auth-header "Bearer $FAX_API_KEY" \
     --to-field fax_number --file-field document \
@@ -72,12 +73,12 @@ python3 scripts/send_fax.py output.fax.pdf --provider generic \
 
 ```bash
 export MFAX_API_KEY=sk_live_xxx
-python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.fax.pdf \
+python3 -m pdf_fax_optimizer.optimize_pdf INPUT.pdf -o OUTPUT.fax.pdf \
     --fax-resolution fine --dither auto \
     --send mfax --to +14155551234 --dry-run     # drop --dry-run to transmit
 ```
 
-`optimize_pdf.py` accepts the same sending flags as `send_fax.py`. The file is
+`pdf-fax-optimizer` accepts the same sending flags as `pdf-fax-send`. The file is
 optimized and the report printed first, then the transmission is attempted.
 
 ## Result & exit code

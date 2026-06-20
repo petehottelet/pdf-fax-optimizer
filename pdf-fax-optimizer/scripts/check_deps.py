@@ -1,97 +1,16 @@
 #!/usr/bin/env python3
-"""Check (and pip-install) the dependencies the optimizer needs.
+"""Back-compat shim — see pdf_fax_optimizer/check_deps.py for the implementation.
 
-Run this once before using the skill. Pip packages are installed with
---break-system-packages because the sandbox uses the system interpreter.
-CLI tools (qpdf, optional ghostscript) can't be pip-installed; we just report
-their presence so the caller knows what's available.
+Prefer `python -m pdf_fax_optimizer.check_deps`.
 """
-import importlib
-import shutil
-import subprocess
+import os
 import sys
 
-PIP_PKGS = {
-    "fitz": "pymupdf",
-    "PIL": "Pillow",
-    "numpy": "numpy",
-    "cv2": "opencv-python-headless",
-    "img2pdf": "img2pdf",
-}
+_SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _SKILL_DIR not in sys.path:
+    sys.path.insert(0, _SKILL_DIR)
 
-# Optional features:
-#  - requests: transmit via a cloud fax API (scripts/send_fax.py)
-#  - rapidocr_onnxruntime: --ocr-text, recognise & re-typeset baked-in image text
-#    (self-contained ONNX models, no system binary). Reported, not auto-installed,
-#    since it's a large optional download only needed for the OCR feature.
-OPTIONAL_PKGS = {
-    "requests": "requests",
-}
-OPTIONAL_REPORT_ONLY = {
-    "rapidocr_onnxruntime": "rapidocr-onnxruntime (for --ocr-text)",
-}
-
-
-def ensure_pip(mod, pkg):
-    try:
-        importlib.import_module(mod)
-        return True, "present"
-    except ImportError:
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--break-system-packages",
-             "-q", pkg],
-            check=False,
-        )
-        try:
-            importlib.import_module(mod)
-            return True, "installed"
-        except ImportError:
-            return False, "FAILED to install"
-
-
-def main():
-    ok = True
-    print("Python packages:")
-    for mod, pkg in PIP_PKGS.items():
-        good, status = ensure_pip(mod, pkg)
-        ok = ok and good
-        print(f"  {pkg:24s} {status}")
-
-    print("Python packages (optional — for sending faxes):")
-    for mod, pkg in OPTIONAL_PKGS.items():
-        good, status = ensure_pip(mod, pkg)
-        print(f"  {pkg:24s} {status if good else 'missing (optional)'}")
-
-    print("Python packages (optional — for --ocr-text image text recognition):")
-    for mod, label in OPTIONAL_REPORT_ONLY.items():
-        try:
-            importlib.import_module(mod)
-            status = "present"
-        except ImportError:
-            status = "missing (pip install rapidocr-onnxruntime to enable)"
-        print(f"  {label:40s} {status}")
-
-    # Fax mode embeds CCITT-G4 via img2pdf and does not require any CLI tool.
-    # qpdf / ghostscript are optional (handy for separate PDF work) — reported
-    # for convenience only. LibreOffice (soffice) is optional too, needed only
-    # to convert Word/PowerPoint/Excel/OpenDocument input to PDF.
-    print("CLI tools (optional):")
-    for tool in ("qpdf", "gs"):
-        path = shutil.which(tool)
-        print(f"  {tool:24s} {'present' if path else 'missing'} (optional)")
-
-    import to_pdf  # local module; finds soffice on PATH or common locations
-    soffice = to_pdf.find_soffice()
-    print(f"  {'libreoffice (soffice)':24s} "
-          f"{soffice if soffice else 'missing'} "
-          f"(optional — for Office/OpenDocument input)")
-
-    if not ok:
-        print("\nSome required pip packages are missing. They should self-install "
-              "above; if a pip install failed, check network/proxy settings.")
-        sys.exit(1)
-    print("\nAll required dependencies satisfied.")
-
+from pdf_fax_optimizer.check_deps import main  # noqa: E402
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

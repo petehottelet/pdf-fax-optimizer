@@ -1,0 +1,127 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pdf-fax-optimizer"
+dynamic = ["version"]
+description = "Convert a PDF (or office doc) into a 1-bit CCITT-G4 fax that arrives legible after Group-3 transmission."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Pete Hottelet" }]
+keywords = [
+    "pdf",
+    "fax",
+    "ccitt-g4",
+    "group-3",
+    "halftone",
+    "dithering",
+    "binarization",
+    "document-imaging",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Fax",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Multimedia :: Graphics :: Graphics Conversion",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "PyMuPDF>=1.24",
+    "Pillow>=10.0",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "img2pdf>=0.5",
+]
+
+[project.optional-dependencies]
+# Recognise & re-typeset text baked into photos (--recover-text / --ocr-text).
+ocr = ["rapidocr-onnxruntime>=1.3"]
+# Transmit the optimized file through a cloud fax API (--send / pdf-fax-send).
+send = ["requests>=2.31"]
+# Everything an end user might want.
+all = [
+    "rapidocr-onnxruntime>=1.3",
+    "requests>=2.31",
+]
+# Contributor toolchain.
+dev = [
+    "pytest>=8",
+    "pytest-cov",
+    "ruff>=0.5",
+    "build",
+    "twine",
+    "requests>=2.31",
+]
+
+[project.scripts]
+pdf-fax-optimizer = "pdf_fax_optimizer.cli:main"
+pdf-fax-send = "pdf_fax_optimizer.send_fax:main"
+
+[project.urls]
+Homepage = "https://github.com/petehottelet/pdf-fax-optimizer"
+Repository = "https://github.com/petehottelet/pdf-fax-optimizer"
+Issues = "https://github.com/petehottelet/pdf-fax-optimizer/issues"
+Releases = "https://github.com/petehottelet/pdf-fax-optimizer/releases"
+
+# --------------------------------------------------------------------------- #
+# Build configuration                                                         #
+# --------------------------------------------------------------------------- #
+# The importable package lives inside the skill folder so a single tree serves
+# both pip users and agents that load the skill zip — no duplication, no copy
+# step. Hatch maps the nested directory to a top-level `pdf_fax_optimizer`
+# package in the built wheel.
+[tool.hatch.version]
+path = "pdf-fax-optimizer/pdf_fax_optimizer/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+# The bundled binary assets (blue/green-noise matrices, the Oswald font) live
+# inside the package directory and are included automatically.
+packages = ["pdf-fax-optimizer/pdf_fax_optimizer"]
+artifacts = [
+    "pdf-fax-optimizer/pdf_fax_optimizer/assets/*.npy",
+    "pdf-fax-optimizer/pdf_fax_optimizer/assets/*.ttf",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/pdf-fax-optimizer/pdf_fax_optimizer",
+    "/tests",
+    "/README.md",
+    "/LICENSE",
+    "/requirements.txt",
+    "/pyproject.toml",
+]
+
+# --------------------------------------------------------------------------- #
+# Tooling                                                                      #
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["00_Project_Files", "docs"]
+
+[tool.ruff.lint]
+# Conservative set: pyflakes (F) + a pragmatic slice of pycodestyle (E).
+# The codebase has long-standing intentional style choices; keep the gate
+# focused on real defects (unused imports/names, undefined names) for now.
+select = ["F", "E9"]
+ignore = ["E402", "F403", "F405"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "ocr: tests that require the optional rapidocr-onnxruntime engine",
+    "soffice: tests that require LibreOffice (soffice) on PATH",
+]

@@ -16,8 +16,10 @@ compatibility: >-
   rapidocr-onnxruntime (self-contained, no system binary). Without OCR the
   skill still works — it falls back to the binarizer's default black-on-white
   for document text and skips the within-image recover-text recolor. No CLI
-  tools are required for PDF/image input. Run scripts/check_deps.py first; it
-  installs the pip packages if missing.
+  tools are required for PDF/image input. Verify deps with
+  `python3 -m pdf_fax_optimizer.check_deps`; install with
+  `pip install pdf-fax-optimizer` (add the `[ocr,send]` extras for OCR and
+  cloud-fax sending) or `pip install -r requirements.txt`.
 ---
 
 # PDF FAX
@@ -41,7 +43,9 @@ stays readable on the receiving machine.
 Verify the environment once:
 
 ```bash
-python3 scripts/check_deps.py        # installs missing pip deps
+python3 -m pdf_fax_optimizer.check_deps   # detect-only; prints the pip command
+# then, if anything is missing:
+pip install pdf-fax-optimizer             # or: pip install -r requirements.txt
 ```
 
 ## How it works
@@ -67,17 +71,23 @@ The pipeline runs at the **source's NATIVE resolution with SQUARE pixels,
 hard-capped at 300 PPI** — raster input (a PNG/JPG, a scanned page) comes
 through pixel-for-pixel below the ceiling and bicubic-downsamples to 300 PPI
 above it, **never upscaled, never anisotropically stretched.** 300 PPI is the
-legibility plateau of the 1-bit fax channel: a fine fax preset is 196 lpi
-vertical and super-fine is 391 lpi vertical anisotropic, and a square 300-PPI
-grid exceeds both effective resolutions while keeping page buffers at ~8 MP
-for letter-size. Upscaling a wrapped raster bicubic-interpolates its baked-in
-text and soft letterforms break the binarizer ("ABC" reads as "A8C"); a raster
-source's text quality is *fundamentally* bounded by its own pixel grid, so the
-pipeline honours that exactly. The `--fax-resolution` preset (`fine` /
+legibility plateau of the 1-bit fax channel, and a square 300-PPI grid keeps
+page buffers at ~8 MP for letter-size. (*Background:* classic fax is
+**anisotropic** — a fine preset is 196 lines-per-inch vertical, super-fine 391
+lpi vertical — but this pipeline renders a **square** grid whose 300 PPI exceeds
+both of those vertical line rates, so dropping the stretched axis costs nothing
+the channel could carry.) Upscaling a wrapped raster bicubic-interpolates its
+baked-in text and soft letterforms break the binarizer ("ABC" reads as "A8C"); a
+raster source's text quality is *fundamentally* bounded by its own pixel grid, so
+the pipeline honours that exactly. The `--fax-resolution` preset (`fine` /
 `superfine`, **default `superfine`**) sets the halftone screen detail and the
-rasterization DPI for **vector PDFs only** (whose glyphs are real vectors the
-renderer can rasterise crisp at any DPI), again clipped to the 300-PPI
-ceiling. At low native DPI the recommender auto-picks an FM screen
+rasterization DPI for **vector content** (whose glyphs are real vectors the
+renderer can rasterise crisp at any DPI), clipped to the 300-PPI ceiling. On a
+**mixed page** — live vector text plus an embedded low-DPI raster — the preset
+acts as a *floor* for the live text, so a single 72-DPI image can no longer drag
+the whole page (and its crisp body text) down to 72 PPI; a higher-DPI embedded
+raster can still pull the page up toward the 300 cap. At low native DPI the
+recommender auto-picks an FM screen
 (`blue-noise` / `atkinson`) — its dot pitch is the pixel itself, with no
 multi-pixel cell, so the screen looks fine and organic where a clustered cell
 would collapse to a chunky 24-lpi magazine pitch. Pass `--transmission-safe`
@@ -87,14 +97,14 @@ to send through a real fax machine.
 Run it:
 
 ```bash
-python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf \
+python3 -m pdf_fax_optimizer.optimize_pdf INPUT.pdf -o OUTPUT.pdf \
     --sample 1 --report OUTPUT.report.json     # superfine + OCR by default
 ```
 
 ### Input: PDF, Office, or image
 
 `INPUT` doesn't have to be a PDF. The optimizer normalizes other formats to PDF
-first (via `scripts/to_pdf.py`), then runs the identical pipeline:
+first (via `pdf_fax_optimizer.to_pdf`), then runs the identical pipeline:
 
 - **PDF** — used directly.
 - **Images** (`.png/.jpg/.tif/.bmp/.gif/.webp`) — wrapped to PDF with `img2pdf`
@@ -106,7 +116,7 @@ first (via `scripts/to_pdf.py`), then runs the identical pipeline:
   intermediate PDF beside the output.
 
 ```bash
-python3 scripts/optimize_pdf.py proposal.docx -o proposal.fax.pdf  # Word → fax PDF
+python3 -m pdf_fax_optimizer.optimize_pdf proposal.docx -o proposal.fax.pdf  # Word → fax PDF
 ```
 
 What the pipeline does, per page (details in the reference):
@@ -259,7 +269,7 @@ Algorithms can rank compression objectively, but **only a human eye can judge
 *eye tokens* on the real, encoded output:
 
 ```bash
-python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.pdf \
+python3 -m pdf_fax_optimizer.optimize_pdf INPUT.pdf -o OUTPUT.pdf \
     --fax-resolution fine --sample 1 --panels 6 --report OUTPUT.report.json
 ```
 
@@ -277,10 +287,7 @@ The skill therefore does both jobs the user asked for: (a) it **suggests the
 optimal** method from the page's content (photo fraction, fax-heavy, line
 condition), and (b) it lets the user **choose the optimal** by eye from the
 contact sheet. Offer this whenever a fax has meaningful photo content — then
-re-run with the chosen `--dither` for the final file. The legacy
-`--compare-page` and `--preview-page` flags still work for backward
-compatibility, but `--sample --panels` covers the same ground with one
-unified surface.
+re-run with the chosen `--dither` for the final file.
 
 ### Text recolor by the #808080 rule (OCR-driven)
 
@@ -317,7 +324,7 @@ without it):
   leaving doc text to the binarizer.
 
 ```bash
-python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf \
+python3 -m pdf_fax_optimizer.optimize_pdf cover.pdf -o cover.fax.pdf \
     --sample 1                  # 4-panel sheet of the recolor, side-by-side
 ```
 
@@ -350,20 +357,20 @@ output is legible before sending. The default 4-panel layout is:
 Use `--panels K` to ask for 1, 2, 6, 8, 12, or 20 (`max`) panels — every
 higher count is a strict superset of the smaller ones:
 
-- `--panels 1` — just the optimized output (replaces the old `--preview-page`)
+- `--panels 1` — just the optimized output (single-panel preview)
 - `--panels 2` — original + recommended (minimal "before / after")
 - `--panels 6` — adds two representative halftones for a quick side-by-side
 - `--panels 20` (or `max`) — every screen in the SCREENS registry on YOUR
   page (the full catalogue, same layout as `docs/readme/halftone_grid.png`)
 
 ```bash
-python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf --sample 1
+python3 -m pdf_fax_optimizer.optimize_pdf cover.pdf -o cover.fax.pdf --sample 1
 # writes cover.fax.sample_p1.png
 
-python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf --sample 3 --panels max
+python3 -m pdf_fax_optimizer.optimize_pdf cover.pdf -o cover.fax.pdf --sample 3 --panels max
 # 20-panel "every halftone screen" sheet for page 3 of a multi-page deck
 
-python3 scripts/optimize_pdf.py cover.pdf -o cover.fax.pdf --sample 1 \
+python3 -m pdf_fax_optimizer.optimize_pdf cover.pdf -o cover.fax.pdf --sample 1 \
     --sample-include orig,gray,clustered,floyd,line   # custom recipe
 ```
 
@@ -397,7 +404,7 @@ is the acceptance test**:
   side by side. This is the fastest way to confirm aspect ratio, that the
   halftone is on image areas only, and that the recommended pick reads.
 - For a single-panel preview of the exact bytes that will transmit, use
-  `--sample N --panels 1` (which replaces the old `--preview-page`).
+  `--sample N --panels 1`.
 - When there's real photo content and the user wants to choose between
   halftone schemes, ask for more panels: `--sample N --panels 6` for a
   curated comparison, `--panels 12` or `--panels max` (=20) for a full
@@ -424,7 +431,7 @@ to confirm the request before transmitting):
 
 ```bash
 export MFAX_API_KEY=sk_live_xxx
-python3 scripts/optimize_pdf.py INPUT.pdf -o OUTPUT.fax.pdf \
+python3 -m pdf_fax_optimizer.optimize_pdf INPUT.pdf -o OUTPUT.fax.pdf \
     --transmission-safe \
     --send mfax --to +14155551234 --dry-run     # drop --dry-run to transmit
 ```
@@ -435,7 +442,7 @@ clamps the rendered scanline to 1728 px so a real fax machine can transmit it.
 Or send an already-optimized file directly:
 
 ```bash
-python3 scripts/send_fax.py OUTPUT.fax.pdf --provider mfax --to +14155551234
+python3 -m pdf_fax_optimizer.send_fax OUTPUT.fax.pdf --provider mfax --to +14155551234
 ```
 
 Rules: **never** put an API key on the command line (use the provider's env var);

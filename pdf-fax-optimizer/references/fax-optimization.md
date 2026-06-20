@@ -64,8 +64,9 @@ hard-capped at 300 PPI**:
 | `standard` | 98 dpi | Smallest output; text-only memos that don't need detail |
 
 **Why 300 PPI is the cap.** 300 PPI is the legibility plateau of the 1-bit
-fax channel: real fax superfine is 196×391 anisotropic, real fine is 196×196
-— a square 300-PPI grid exceeds both on the scan-line axis. Rendering higher
+fax channel — a square 300-PPI grid already exceeds what the channel can
+resolve on the scan-line axis (the comparison to the historical anisotropic
+line rates is in *Background* below). Rendering higher
 just makes the halftone CPU spend longer per pixel for no extra fidelity
 that the channel can carry, and a 600-PPI buffer for a 10-inch slide is 20+
 megapixels per page, vs. ~5 MP at the ceiling. Per-page buffers stay
@@ -73,16 +74,28 @@ predictable: letter-size 8.5×11" → ~8 MP, 10×5.6" slide → ~5 MP, regardles
 of source resolution.
 
 The preset only sets:
-1. The square DPI **vector pages** rasterize at (clipped to 300 PPI).
+1. The square DPI **vector content** rasterizes at (clipped to 300 PPI).
 2. The halftone screen detail (dot cell size scales with the rendered DPI).
 
-A raster source's pixel grid is the rendered grid, full stop — the preset has
-no effect on raster sources.
+**Pure raster page** (no live vector text): the source's pixel grid is the
+rendered grid and the preset has no effect — full stop. **Mixed page** (live
+vector text *plus* an embedded raster): the preset becomes a **floor** so the
+live text stays crisp, and the page renders at `min(300, max(preset, native))`.
+This stops a single low-DPI embedded image (e.g. a 72-DPI gradient) from
+dragging the whole page — including its vector body text — down to 72 PPI; a
+higher-DPI embedded raster can still pull the page up toward the 300 cap. The
+per-page JSON report records the outcome in `chosen_dpi` / `chosen_dpi_reason`
+(one of `vector_preset`, `raster_native`, `mixed_preset_floor`,
+`native_raster_upshift`, `clamped_to_max`).
 
-**Why we no longer use anisotropic fax DPIs.** Real Group-3 lines used
-non-square pixels (204×98 / 204×196 / 204×391); rendering anisotropically
+**Background — why we no longer render anisotropic.** Real Group-3 lines used
+non-square pixels: standard is 204×98, fine 204×196, super-fine 204×391
+(≈196×391 effective on the page). Rendering anisotropically
 matched the wire format but distorted the page when shown on any modern viewer
-(square pixels), and forced an aspect-ratio recovery step everywhere. By
+(square pixels), and forced an aspect-ratio recovery step everywhere. A square
+300-PPI grid exceeds every one of those vertical line rates while staying
+correctly proportioned, so dropping the stretched axis costs nothing the
+channel could carry. By
 rendering square at native resolution we keep the document correctly
 proportioned at every stage — TIFF, PDF, preview, sample sheet, OCR — at the
 cost that the rendered scanline can exceed the historical 1728-px cap. Pass
@@ -424,10 +437,9 @@ The output should be cheap and robust to send, not just small on disk:
 - **Already-bilevel input** — detect (image is already 1-bit / two-tone) and skip
   reprocessing so you don't dither a clean bitmap into noise.
 - **Preview before send.** `--sample N --panels 1` writes a PNG of exactly the
-  bilevel output that will be transmitted (the legacy `--preview-page N` flag
-  still works). Always offer this for fax jobs; it's the cheapest insurance
-  against faxing something unreadable. For a layered "before / after" with the
-  recommendation marked, use `--panels 2`.
+  bilevel output that will be transmitted. Always offer this for fax jobs; it's
+  the cheapest insurance against faxing something unreadable. For a layered
+  "before / after" with the recommendation marked, use `--panels 2`.
 
 ---
 
@@ -452,9 +464,6 @@ The output should be cheap and robust to send, not just small on disk:
 | `--sample-include` | recipe | Comma-separated panel content keys for a custom `--sample` recipe; overrides `--panels`. Keys: `orig`, `gray`, `default_fax`, `optimized`, `recommended`, or any dither name (incl. `screen-{square,diamond,ellipse}`) |
 | `--no-sample-header` | off | Omit the 3-line settings-header strip above the sample grid |
 | `--recover-text-preview` | none | Side-by-side PNG faxed WITHOUT vs WITH the within-image recover recolor (§5) |
-| `--compare-page` | none | (legacy) Render the curated 6-up of schemas to one contact sheet — equivalent to `--sample N --panels 6` |
-| `--compare-original` | off | (legacy) Lead the sheet with original-color (#1) + true-grayscale (#2) references |
-| `--compare-methods` | curated | (legacy) Override which schemas appear in the `--compare-page` comparison |
 | `--fax-heavy` | off | Bias to clustered: compresses + survives noisy lines |
 | `--segmentation` | `embedded` | MRC routing; `variance` for flattened scans |
 | `--thicken` | off | Save hairlines/small fonts from vanishing (§5) |
@@ -463,7 +472,10 @@ The output should be cheap and robust to send, not just small on disk:
 | `--deskew` | on | Straighten runs; improve compression + legibility |
 | `--format` | `pdf` | `tiff` emits Class-F fax-ready multipage G4 |
 | `--line-rate` | `14400` | Transmission-time estimate basis (§6) |
-| `--preview-page` | none | (legacy) Inspect actual bilevel output before sending — equivalent to `--sample N --panels 1` |
+
+(Older `--compare-page` / `--compare-original` / `--compare-methods` /
+`--preview-page` flags remain as compatibility aliases — see
+`config-schema.md`.)
 
 ---
 
@@ -480,7 +492,7 @@ The output should be cheap and robust to send, not just small on disk:
 - **img2pdf** embeds the G4 TIFF into a PDF *without re-encoding* (the PDF carries
   a `CCITTFaxDecode` filter). No CLI tools are required. It also wraps loose
   **image** input into a one-page PDF at the front of the pipeline.
-- **Input normalization (`scripts/to_pdf.py`)** turns non-PDF input into PDF
+- **Input normalization (`pdf_fax_optimizer.to_pdf`)** turns non-PDF input into PDF
   before anything else: images via img2pdf; **Word/PowerPoint/Excel/OpenDocument/
   text** via **LibreOffice headless** (`soffice --headless --convert-to pdf`).
   LibreOffice is optional and only needed for those office formats; everything

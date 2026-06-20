@@ -32,17 +32,20 @@ transmission and **arrives legible on the receiving machine.**
 > **[pdf-email-optimizer](https://github.com/petehottelet/pdf-email-optimizer)**.
 
 To make a fax legible, the skill models the Group-3 constraint (1-bit,
-run-length compression along each scanline) and runs an OCR-driven, layered
-pipeline: it renders at the **source's native resolution with square pixels**
-(no aspect distortion, no down-scaling), segments image areas, runs OCR over
-the page, and recolors **every recognised word's glyphs to SOLID BLACK or SOLID
-WHITE by a single bright-line rule — median field luminance vs `#808080`**.
-The recoloured glyphs ride a **text layer composited above** the halftoned
-image layer, so the screen can never disturb them. It defends fine detail
-(background flatten, despeckle, deskew, optional stroke thickening), warns
-about content that won't survive bilevel, and lets you **preview exactly what
-will be transmitted** with a 4-panel sample sheet so you can confirm it's
-readable before sending.
+run-length compression along each scanline) and runs a layered Mixed Raster
+Content pipeline: it renders at the **source's native resolution with square
+pixels** (no aspect distortion, no down-scaling), segments image areas, routes
+text through a contrast-maximising binariser and photos through a tunable
+halftone screen, and rescues dark text on saturated-colour fills with the
+default-on `preserve_text` pass. With **`--recover-text on`** it additionally
+runs OCR over the page and recolours **every recognised word's glyphs to SOLID
+BLACK or SOLID WHITE by a single bright-line rule — median field luminance vs
+`#808080`** — riding the recoloured glyphs on a **text layer composited above**
+the halftoned image layer so the screen can never disturb them. It defends
+fine detail (background flatten, despeckle, deskew, optional stroke
+thickening), warns about content that won't survive bilevel, and lets you
+**preview exactly what will be transmitted** with a 4-panel sample sheet so
+you can confirm it's readable before sending.
 
 The `SKILL.md` format is an open standard. This skill is built and tested for
 **Claude** (Claude Code / claude.ai) and **OpenAI Codex**.
@@ -54,16 +57,25 @@ The `SKILL.md` format is an open standard. This skill is built and tested for
 - Rasterizes each page at the **source's native resolution with square pixels**
   — raster sources (PNG, JPG, scans) come through pixel-for-pixel with their
   original aspect ratio; vector sources rasterize square at the
-  `--fax-resolution` preset (default **`superfine`**).
+  `--fax-resolution` preset (default **`superfine`**), hard-capped at 300 PPI.
+  On a **mixed page** (live vector text plus an embedded low-DPI image) the
+  preset is honoured as a *floor* for the live text, so a single 72-DPI picture
+  can't drag the crisp body text down with it — a higher-DPI image can still
+  pull the page up toward the cap. Each page's chosen DPI and the reason for it
+  are recorded in the JSON report (`chosen_dpi` / `chosen_dpi_reason`).
 - MRC-lite segmentation using the PDF's embedded-image rectangles: photos go to
   halftone, document text goes to an adaptive binarizer, with a guard for
   full-page rasters so the document's own text never gets dithered.
-- **OCR-driven text recolor** (default on): `rapidocr-onnxruntime` locates
-  every word — outside images (`--ocr-text`) and, with `--recover-text`, inside
-  images — and the pipeline marks each word BLACK or WHITE by the **#808080
-  rule** (median field luma < 128 → WHITE; ≥ 128 → BLACK). The recoloured
-  glyphs ride a layer composited **above** the halftone, so the screen can
-  never disturb them.
+- **OCR-driven text recolor** (opt-in via `--recover-text on`):
+  `rapidocr-onnxruntime` locates every word in two scopes — outside images
+  (the `--ocr-text` scope: header/footer/form text) and inside images (the
+  `--recover-text` scope: signage, captions) — and the pipeline marks each
+  word BLACK or WHITE by the **#808080 rule** (median field luma < 128 →
+  WHITE; ≥ 128 → BLACK). The recoloured glyphs ride a layer composited
+  **above** the halftone, so the screen can never disturb them. OCR is off by
+  default because it's the slow step (≈20+ min on a 6-page 391-DPI deck); the
+  default pipeline relies on the contrast binariser + `preserve_text` and is
+  already legible for the vast majority of documents.
 - Pre-cleans: background flatten, despeckle, deskew; optional stroke thickening
   to save hairlines and small fonts.
 - Emits lossless CCITT-G4 (no re-encode) via img2pdf — a `CCITTFaxDecode` PDF or
@@ -72,11 +84,14 @@ The `SKILL.md` format is an open standard. This skill is built and tested for
 - `--transmission-safe` clamps the final scanline to 1728 px when you need
   strict Group-3 transmissibility (default keeps native resolution for
   legibility).
-- Produces a JSON report with **estimated transmission time per page**, every
-  recoloured word and its polarity, and legibility/inversion warnings — plus
+- Produces a JSON report with **estimated transmission time per page**, the
+  chosen halftone screen and the feature stats that drove the auto-pick,
+  legibility/inversion warnings, and — when `--recover-text on` is used —
+  every OCR-recoloured word with its polarity and field luminance. Plus
   `--sample N` for a labelled contact sheet that goes from 1 panel (preview)
-  up to 20 panels (every halftone screen in the registry), all with a settings
-  header that documents which options produced the sheet.
+  up to 20 panels (every entry in the `SCREENS` registry alongside the colour
+  / grayscale / default-fax references), all with a settings header that
+  documents which options produced the sheet.
 
 ## Optimizing for the channel, not "fax-ifying" the document
 
@@ -103,15 +118,18 @@ like a generic fax. The skill treats a page as Mixed Raster Content and applies 
 Plenty of real fax jobs are full of text that *isn't* live text: a whole page
 exported or scanned as a single image, a screenshot, a caption burned into a
 photo, a sign in a snapshot. If that page were treated as one big picture and
-halftoned, the words would dissolve into dot-screen mud. The pipeline therefore
-runs **OCR over every page** and recolors text by a single bright-line rule —
-the **#808080 rule** — and never lets the halftone touch a glyph:
+halftoned, the words would dissolve into dot-screen mud. With `--recover-text
+on`, the pipeline therefore runs **OCR over the page** and recolors text by a
+single bright-line rule — the **#808080 rule** — and never lets the halftone
+touch a glyph:
 
-1. **Locate every word.** OCR (`rapidocr-onnxruntime`) finds words in two
-   scopes: OUTSIDE the image regions (`--ocr-text` — the page's
-   header/footer/form text) and, with `--recover-text`, INSIDE the image
-   regions (signage, captions). OCR is the locator only; if the engine isn't
-   installed the skill falls back to the binarizer's default black-on-white.
+1. **Locate every word.** With `--recover-text on`, OCR
+   (`rapidocr-onnxruntime`) finds words in two scopes: OUTSIDE the image
+   regions (the `--ocr-text` scope — the page's header/footer/form text;
+   toggleable with `--ocr-text off`) and INSIDE the image regions (signage,
+   captions). OCR is the locator only; if `--recover-text` is left off (the
+   default) or the engine isn't installed, the skill falls back to the
+   binarizer's default black-on-white.
 2. **Segment the original glyph pixels.** Each word's OCR box is used to crop;
    glyphs are split from their field using the box's border ring (definitely
    field) — robust where a blind 2-means split would invert. The real
@@ -129,8 +147,11 @@ the **#808080 rule** — and never lets the halftone touch a glyph:
 The payoff: **even when an image is aggressively halftoned for transmission,
 every word inside it stays legible** — and the report lists each recoloured
 word with its OCR confidence, polarity, and field luminance so you can verify.
-A `--no-text-in-image` fallback is also available for the rare case where you
-want pure halftone everywhere.
+The default pipeline (with `--recover-text` off) leaves text baked into images
+to the halftone screen — fine for photographic captions, lossy for billboards
+and signs; flip `--recover-text on` when legibility inside images matters
+enough to spend the OCR pass. A `--no-text-in-image` fallback is also
+available for the rare case where you want pure halftone everywhere.
 
 ### Halftone schemas + the "eye tokens" comparison preview
 
@@ -207,40 +228,49 @@ with the chosen `--dither` for the final file.
 
 ```bash
 # Default 4-panel: original / grayscale / default fax (Otsu) / auto-pick
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --sample 1
 
 # Minimal 2-panel: original + Claude's auto-picked optimal
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --sample 1 --panels 2
 
-# Curated 6-up — same layout the old `--compare-page` shipped
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+# Curated 6-up: the four reference panels + `green-noise` + `floyd`
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --sample 1 --panels 6
 
 # Full catalogue on your own page: every screen in the SCREENS registry,
 # laid out exactly like halftone_grid.png above but for YOUR document
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --sample 1 --panels max
 
 # Power-user custom recipe
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --sample 1 --sample-include orig,gray,clustered,floyd,line
 ```
 
-`--panels K` supports 1, 2, 4 *(default)*, 6, 8, 12, 20 *(`max`)*. Every panel
-count is a strict superset of the smaller ones, so it's a clean detail-dial.
-Every contact sheet carries a 3-line **settings header** at the top documenting
-the exact options that produced it (preserve_text, ocr_text, recover_text,
-text_binarize, dither, transmission_safe, the auto-pick recommendation, and
-the page's photo fraction) — so saved sheets stay self-documenting weeks
-later. Add `--no-sample-header` to omit it. The old `--compare-page` and
-`--preview-page` flags still work for backward compatibility.
+`--panels K` supports 1, 2, 4 *(default)*, 6, 8, 12, 20 *(`max`)*. Counts
+4–12 anchor the four reference panels (`orig`, `gray`, `default_fax`,
+`recommended`) and fill the remaining slots with a curated set of halftones
+chosen to span the design space; `--panels max` (20) drops the explicit
+`recommended` slot and instead lays out the colour / grayscale /
+default-Otsu references next to every entry in the `SCREENS` registry, with
+the auto-picked screen badged in-place — exactly the catalogue in
+`halftone_grid.png` above, but for *your* document. Use `--sample-include`
+to pin an exact panel set. Every contact sheet carries a 3-line **settings
+header** at the top documenting the exact options that produced it
+(preserve_text, ocr_text, recover_text, text_binarize, dither,
+transmission_safe, the auto-pick recommendation, and the page's photo
+fraction) — so saved sheets stay self-documenting weeks later. Add
+`--no-sample-header` to omit it.
 
 ### Text That Survives the Fax
 
-Two layered passes protect text against the 1-bit channel. Both are on by
-default and the report lists everything they touched so you can verify.
+Two layered passes protect text against the 1-bit channel: **`preserve_text`**
+runs by default (no OCR needed, fast) and **`recover_text`** is opt-in
+(requires the OCR engine and adds ~20+ minutes of inference on a typical 6-page
+deck — that's why it isn't on by default). The report lists everything they
+touched so you can verify.
 
 **`preserve_text` — dark text on any colored fill (no OCR needed).** Slide
 labels on highlight chips, dashboard status badges, colored table cells,
@@ -273,7 +303,7 @@ auditable rather than magic: open the report, search for any word in the
 document, see precisely which polarity it carried and why.
 
 <details>
-<summary><strong>Example excerpt</strong> — one page, abbreviated</summary>
+<summary><strong>Example excerpt</strong> — one page, abbreviated (produced with <code>--recover-text on</code>, which is what populates the <code>ocr_text</code> / <code>recover_text</code> word lists)</summary>
 
 ```json
 {
@@ -365,10 +395,10 @@ fax pipeline:
 
 ```bash
 # Fax a Word doc directly (defaults: superfine + OCR-driven #808080 polarity)
-python pdf-fax-optimizer/scripts/optimize_pdf.py proposal.docx -o proposal.fax.pdf
+pdf-fax-optimizer proposal.docx -o proposal.fax.pdf
 
 # Fax a scanned image with a 4-panel sample sheet
-python pdf-fax-optimizer/scripts/optimize_pdf.py scan.jpg -o scan.fax.pdf --sample 1
+pdf-fax-optimizer scan.jpg -o scan.fax.pdf --sample 1
 ```
 
 Images are wrapped to PDF with `img2pdf` (no extra tools). Office/OpenDocument
@@ -381,28 +411,32 @@ retain the intermediate PDF next to the output.
 
 ```
 .
-├── README.md              # this file (for humans)
-├── LICENSE                # MIT
-├── requirements.txt       # Python deps
-└── pdf-fax-optimizer/         # the skill (this folder IS the skill)
-    ├── SKILL.md           # entry point: metadata + instructions
-    ├── agents/
-    │   └── openai.yaml     # optional Codex UI sidecar
-    ├── assets/
-    │   ├── bluenoise_64.npy       # cached void-and-cluster blue-noise matrix
-    │   ├── greennoise_64_s4.0.npy # cached green-noise (clustered FM) matrix
-    │   └── Oswald.ttf             # bundled display font for the comparison title
-    ├── scripts/
-    │   ├── check_deps.py   # verify/install dependencies
-    │   ├── optimize_pdf.py # CLI entry point (optimize, and optionally --send)
-    │   ├── fax_pipeline.py # the fax conversion pipeline
-    │   ├── to_pdf.py       # normalize Office/image input to PDF
-    │   └── send_fax.py     # transmit via a cloud fax API (mFax/Phaxio/generic)
-    └── references/
-        ├── fax-optimization.md  # the Group-3 model + why each knob exists
-        ├── config-schema.md     # JSON config schema + examples
-        └── sending.md           # send via a cloud fax API
+├── README.md                  # this file (for humans)
+├── LICENSE                    # MIT
+├── pyproject.toml             # packaging: deps, extras, console scripts
+├── requirements.txt           # Python deps (mirrors pyproject for `pip install -r`)
+├── tests/                     # pytest suite (synthetic fixtures, no large binaries)
+├── .github/workflows/         # CI (lint + test matrix) and release-to-PyPI
+└── pdf-fax-optimizer/             # the skill (this folder IS the skill / release zip)
+    ├── SKILL.md               # entry point: metadata + instructions
+    ├── agents/openai.yaml      # optional Codex UI sidecar
+    ├── references/            # fax-optimization.md, config-schema.md, sending.md
+    ├── scripts/               # thin back-compat shims -> pdf_fax_optimizer.*
+    └── pdf_fax_optimizer/     # the importable / pip-installable Python package
+        ├── __init__.py        # version + public API (FaxOptions, convert_pdf, …)
+        ├── cli.py             # `pdf-fax-optimizer` console-script entry point
+        ├── optimize_pdf.py    # CLI argument parsing + orchestration
+        ├── fax_pipeline.py    # the fax conversion pipeline
+        ├── to_pdf.py          # normalize Office/image input to PDF
+        ├── send_fax.py        # transmit via a cloud fax API (mFax/Phaxio/generic)
+        ├── ocr_text.py        # optional OCR backend (rapidocr-onnxruntime)
+        ├── check_deps.py      # detect dependencies; report what's missing
+        └── assets/            # bluenoise_64.npy, greennoise_64_s4.0.npy, Oswald.ttf
 ```
+
+The same tree serves both audiences: `pip install pdf-fax-optimizer` installs the
+`pdf_fax_optimizer` package, while the `pdf-fax-optimizer/` folder is the agent
+skill (and the release zip) — one source of truth, no duplication.
 
 ## Requirements
 
@@ -419,10 +453,53 @@ retain the intermediate PDF next to the output.
 - **LibreOffice** (optional) — only needed to fax **Office/OpenDocument** input
   (Word/PowerPoint/Excel); it runs headless, no GUI.
 
-Let the skill bootstrap the Python side:
+Check what's present (detect-only; prints the right `pip install` command for
+anything missing):
 
 ```bash
-python pdf-fax-optimizer/scripts/check_deps.py   # installs missing pip deps
+python -m pdf_fax_optimizer.check_deps
+```
+
+## Install (CLI)
+
+The fastest way to get the `pdf-fax-optimizer` command is pip:
+
+```bash
+pip install pdf-fax-optimizer                 # core
+pip install "pdf-fax-optimizer[ocr,send]"     # + OCR text rescue + cloud-fax sending
+```
+
+Then run it directly:
+
+```bash
+pdf-fax-optimizer input.pdf -o output.fax.pdf --sample 1 --report output.report.json
+```
+
+Optional extras: `ocr` adds `rapidocr-onnxruntime` (the OCR-driven `--recover-text`
+/ `--ocr-text` passes), `send` adds `requests` (the `pdf-fax-send` transmit path),
+and `all` pulls in both.
+
+### From source
+
+```bash
+git clone https://github.com/petehottelet/pdf-fax-optimizer.git
+cd pdf-fax-optimizer
+pip install -e ".[all]"          # editable install with every optional feature
+```
+
+Without installing, you can also run the package straight from a checkout
+(the skill folder is on the path):
+
+```bash
+python -m pdf_fax_optimizer.optimize_pdf input.pdf -o output.fax.pdf --sample 1
+```
+
+### Development
+
+```bash
+pip install -e ".[dev]"          # pytest, ruff, build, twine, …
+pytest                            # run the test suite (synthetic fixtures, no large binaries)
+ruff check .                      # lint
 ```
 
 ## Installing the skill
@@ -480,23 +557,24 @@ or explicitly via `$pdf-fax-optimizer`. (Codex caps the frontmatter `description
 
 ## Using it directly (without an agent)
 
-The scripts are a normal CLI:
+After `pip install pdf-fax-optimizer` it's a normal CLI (or run
+`python -m pdf_fax_optimizer.optimize_pdf …` straight from a source checkout):
 
 ```bash
 # Make a PDF faxable (default: superfine, native res, OCR + #808080 on)
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --report output.report.json --sample 1
 
 # Compare halftone methods side-by-side and pick by eye (6-up, 12-up, max…)
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --sample 1 --panels 6
 
 # Strict Group-3 transmissibility (1728-px scanline) for a real fax machine
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --transmission-safe
 
 # Multipage Class-F G4 TIFF instead of a PDF
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.tiff \
+pdf-fax-optimizer input.pdf -o output.tiff \
     --format tiff
 ```
 
@@ -516,12 +594,12 @@ as Telnyx or SRFax). Always pass keys via environment variables, and use
 export MFAX_API_KEY=sk_live_xxx
 
 # optimize and send in one step (transmission-safe for real fax lines)
-python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+pdf-fax-optimizer input.pdf -o output.fax.pdf \
     --transmission-safe \
     --send mfax --to +14155551234 --dry-run     # drop --dry-run to transmit
 
 # or send an already-optimized file
-python pdf-fax-optimizer/scripts/send_fax.py output.fax.pdf \
+pdf-fax-send output.fax.pdf \
     --provider phaxio --to +14155551234
 ```
 
