@@ -102,8 +102,15 @@ omitted keys fall back to the documented defaults.
 ```
 
 > Note: `--sample N`, `--panels K`, `--sample-include LIST`,
-> `--no-sample-header`, `--compare-page N`, `--compare-methods a,b,c`, and
-> `--recover-text-preview N` are CLI-only flags, not config keys.
+> `--no-sample-header`, and `--recover-text-preview N` are CLI-only flags, not
+> config keys.
+>
+> **Compatibility aliases** (CLI-only; kept so older invocations keep working —
+> prefer the unified `--sample`/`--panels` surface):
+> `--compare-page N` ≡ `--sample N --panels 6`,
+> `--compare-original` ≡ leads the sheet with original-colour + grayscale
+> reference panels, `--compare-methods a,b,c` ≡ `--sample-include a,b,c`,
+> `--preview-page N` ≡ `--sample N --panels 1`.
 
 ## Annotated example — faxing scanned clinical paperwork with a photo
 
