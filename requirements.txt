@@ -1,4 +1,5 @@
 # Python dependencies for the pdf-fax-optimizer skill.
+# Requires Python 3.10+.
 # Install with:  pip install -r requirements.txt
 #
 # No CLI tools are required — fax output is embedded losslessly via img2pdf.

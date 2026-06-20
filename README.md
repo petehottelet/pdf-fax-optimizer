@@ -5,9 +5,9 @@
 # PDF FAX — an Agent Skill
 
 <p align="center">
-  <img alt="PyPI: package not published" src="https://img.shields.io/badge/pypi-package%20not%20published-red.svg">
+  <a href="https://github.com/petehottelet/pdf-fax-optimizer/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/petehottelet/pdf-fax-optimizer?display_name=tag&sort=semver&color=2da44e&label=release"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
-  <img alt="Python 3.9+" src="https://img.shields.io/badge/python-3.9%2B-blue.svg">
+  <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg">
   <img alt="Claude + Codex" src="https://img.shields.io/badge/Claude%20%2B%20Codex-agent%20ready-555555.svg">
   <img alt="Agent Skill (SKILL.md)" src="https://img.shields.io/badge/Agent%20Skill-SKILL.md-orange.svg">
   <img alt="Formats: PDF, DOCX, PPTX, XLSX, image" src="https://img.shields.io/badge/formats-.pdf%20%7C%20.docx%20%7C%20.pptx%20%7C%20.xlsx%20%7C%20image-777777.svg">
@@ -74,8 +74,9 @@ The `SKILL.md` format is an open standard. This skill is built and tested for
   legibility).
 - Produces a JSON report with **estimated transmission time per page**, every
   recoloured word and its polarity, and legibility/inversion warnings — plus
-  `--sample N` for a 4-panel preview sheet (original / grayscale /
-  halftone-only / halftone+recover-text).
+  `--sample N` for a labelled contact sheet that goes from 1 panel (preview)
+  up to 20 panels (every halftone screen in the registry), all with a settings
+  header that documents which options produced the sheet.
 
 ## Optimizing for the channel, not "fax-ifying" the document
 
@@ -137,36 +138,53 @@ A continuous-tone photo can't exist in 1-bit fax — it has to be simulated with
 dot patterns, and that choice is the biggest lever on how a photo reads after a
 lossy transmission. The skill ships these schemas, spanning the design space:
 
-| `--dither` | Family | Detail | G4 size | Noise robustness |
-|---|---|---|---|---|
-| `clustered` | AM screening — round clustered-dot | low–med | **best** | **best** |
-| `screen --dot-shape square` | AM screening — square dot | low–med | **best** | **best** |
-| `screen --dot-shape diamond` | AM screening — diamond dot (newspaper-photo classic) | low–med | **best** | **best** |
-| `screen --dot-shape ellipse` | AM screening — ellipse dot (smooth midtone joins) | low–med | **best** | **best** |
-| `mezzotint` | AM grain — random stippling (expressive; not eligible for `auto`) | med | **worst** | low |
-| `ordered` | Bayer ordered (matrix dither) | med | med | med |
-| `blue-noise` | FM screening (void-and-cluster) | **high** | medium | medium |
-| `green-noise` | hybrid AM–FM (clustered FM) | med–high | good | good |
-| `floyd` | error diffusion (4-tap Floyd-Steinberg) | **highest** | **worst** | **worst** |
-| `atkinson` | error diffusion (6/8 Atkinson, clean whites) | high | med | low–med |
-| `jarvis` | error diffusion (12-tap Jarvis-Judice-Ninke, very smooth) | high | poor | low–med |
-| `stucki` | error diffusion (12-tap Stucki, sharp + smooth) | high | poor | low–med |
-| `sierra` | error diffusion (12-tap Sierra, lighter Jarvis) | high | poor | low–med |
-| `edd` | edge-enhancing error diffusion (high-pass + diffusion) | high | med | low–med |
-| `line` (`woodcut`) | horizontal line screen (engraving) | med | **best** | **best** |
-| `crosshatch` | layered angled line screens (pen-and-ink etching) | med | good | good |
-| `none` | hard threshold (no halftone) | — | **best** | **best** |
+"Detail" is how much fine information the screen carries before the channel
+chews on it. "G4 size" is how richly the chosen screen encodes onto the page —
+a richer screen leaves more bytes for the modem to ship but renders more of
+what the source actually had. "Channel character" is the *kind of trace* the
+screen leaves on the line: long-run AM strokes survive line noise cleanly,
+fine-grain FM stipple holds photographic detail, error-diffusion families
+diffuse tone with their own signature. None of these is "best" in isolation —
+the right pick depends on what's on the page.
 
-`green-noise` is the standout addition for a real fax line — blue-noise detail
-with clustered-dot run-length/robustness, tunable via `--green-noise-coarseness`
-(~2 detail … 8 robust). `line`/`woodcut` renders tone as horizontal stripes that
-thicken with darkness — because the strokes run *along the scanline* it is the
-most G4-friendly way to carry a photo and reads as a clean engraving, never mud.
-Because the pipeline runs at square pixels, the screens are isotropic by
-construction — dots stay round on paper without any anisotropic correction.
-`mezzotint` is an expressive screen — it gives velvety midtones but has no
-spatial coherence, so it compresses poorly and isn't eligible for the auto-picker;
-it has to be requested explicitly.
+| `--dither` | Family | Detail | G4 size | Channel character |
+|---|---|---|---|---|
+| `clustered` | AM screening — round clustered-dot | low–med | minimal | long-run, line-tolerant |
+| `screen --dot-shape square` | AM screening — square dot | low–med | minimal | long-run, line-tolerant |
+| `screen --dot-shape diamond` | AM screening — diamond dot (newspaper-photo classic) | low–med | minimal | long-run, line-tolerant |
+| `screen --dot-shape ellipse` | AM screening — ellipse dot (smooth midtone joins) | low–med | minimal | long-run, line-tolerant |
+| `mezzotint` | AM grain — random stippling (expressive; not eligible for `auto`) | med | rich | stippled grain, decorative |
+| `ordered` | Bayer ordered (matrix dither) | med | med | regular matrix, predictable |
+| `blue-noise` | FM screening (void-and-cluster) | **high** | medium | isotropic fine-grain stipple |
+| `green-noise` | hybrid AM–FM (clustered FM) | med–high | low–med | hybrid stipple/cluster — balanced |
+| `floyd` | error diffusion (4-tap Floyd-Steinberg) | **highest** | rich | fine-grain, detail-first |
+| `atkinson` | error diffusion (6/8 Atkinson, clean whites) | high | med | sparse stipple, clean whites |
+| `jarvis` | error diffusion (12-tap Jarvis-Judice-Ninke, very smooth) | high | rich | diffuse, smooth-tone |
+| `stucki` | error diffusion (12-tap Stucki, sharp + smooth) | high | rich | diffuse, sharp + smooth |
+| `sierra` | error diffusion (12-tap Sierra, lighter Jarvis) | high | rich | diffuse, soft-tone |
+| `edd` | edge-enhancing error diffusion (high-pass + diffusion) | high | med | edge-enhancing, type-friendly |
+| `line` (`woodcut`) | horizontal line screen (engraving) | med | minimal | scanline-aligned stripes |
+| `crosshatch` | layered angled line screens (pen-and-ink etching) | med | low–med | angled strokes, etching |
+| `none` | hard threshold (no halftone) | — | minimal | hard-edge, no halftone |
+
+`green-noise` is the standout for a balanced fax line — blue-noise detail with
+clustered-dot run-length, tunable via `--green-noise-coarseness` (~2 detail … 8
+robust) — and it's the auto-picker's fallback when no other signal dominates.
+But the picker isn't single-track: it now reads cheap content stats (mean/std
+luma, edge density, bimodality, texture) off the photo regions and chooses from
+`{clustered, atkinson, edd, floyd, jarvis, green-noise}` based on what's
+actually on the page — `edd` for text overlaid on a photo, `atkinson` for dark
+high-contrast images, `floyd` for fine-detail texture, `jarvis` for smooth
+gradients, `clustered` for true 2-tone posters. The picked dither plus the
+feature stats that drove it are surfaced in the `--report` JSON so you can see
+WHY a page chose what it chose. `line`/`woodcut` renders tone as horizontal
+stripes that thicken with darkness — because the strokes run *along the
+scanline* it's the most G4-friendly way to carry a photo and reads as a clean
+engraving, never mud. Because the pipeline runs at square pixels, the screens
+are isotropic by construction — dots stay round on paper without any
+anisotropic correction. `mezzotint` is an expressive screen — velvety midtones
+but no spatial coherence, so it compresses richly and isn't eligible for the
+auto-picker; it has to be requested explicitly.
 
 Every screen in the registry, applied to the same letter cover sheet —
 **`floyd`, `jarvis`, and `edd` are highlighted as the OPTIMAL picks** for a
@@ -179,26 +197,45 @@ photographic detail in the masthead, keep edge sharpness on the billboard):
 
 That grid above is the whole catalogue. For picking by eye on your own document
 you don't need all 17 — compression can be ranked by a machine, but **readability
-can't**, and you can't read 17 thumbnails in parallel. So `--compare-page N`
-renders one page of your file through a **curated 6-up subset** of those screens
-(`clustered`, `green-noise`, `blue-noise`, `atkinson`, `floyd`, `line` — one
-representative per family) into a single labeled **contact sheet**, each panel
-annotated with its real G4 size and transmission estimate and the recommended
-pick highlighted. The skill **suggests the optimal** method from the page's
-content, and you **choose the optimal** by spending your *eye tokens* on the
-contact sheet — then re-run with the chosen `--dither` for the final file.
+can't**, and you can't read 17 thumbnails in parallel. So `--sample N --panels K`
+renders one page of your file through K side-by-side panels into a single
+labelled **contact sheet**, each panel annotated with its real G4 size and
+transmission estimate and the recommended pick highlighted. The skill
+**suggests the optimal** method from the page's content, and you **choose the
+optimal** by spending your *eye tokens* on the contact sheet — then re-run
+with the chosen `--dither` for the final file.
 
 ```bash
+# Default 4-panel: original / grayscale / default fax (Otsu) / auto-pick
 python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
-    --compare-page 1
-# -> writes output.fax.compare_p1.png (a 6-up of clustered/green-noise/
-#    blue-noise/atkinson/floyd/line so you can pick the panel that reads best)
+    --sample 1
 
-# Add --compare-original to lead with two reference panels — the original in
-# color (#1) and a true grayscale of it (#2) — followed by four halftones:
+# Minimal 2-panel: original + Claude's auto-picked optimal
 python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
-    --compare-page 1 --compare-original
+    --sample 1 --panels 2
+
+# Curated 6-up — same layout the old `--compare-page` shipped
+python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+    --sample 1 --panels 6
+
+# Full catalogue on your own page: every screen in the SCREENS registry,
+# laid out exactly like halftone_grid.png above but for YOUR document
+python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+    --sample 1 --panels max
+
+# Power-user custom recipe
+python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
+    --sample 1 --sample-include orig,gray,clustered,floyd,line
 ```
+
+`--panels K` supports 1, 2, 4 *(default)*, 6, 8, 12, 20 *(`max`)*. Every panel
+count is a strict superset of the smaller ones, so it's a clean detail-dial.
+Every contact sheet carries a 3-line **settings header** at the top documenting
+the exact options that produced it (preserve_text, ocr_text, recover_text,
+text_binarize, dither, transmission_safe, the auto-pick recommendation, and
+the page's photo fraction) — so saved sheets stay self-documenting weeks
+later. Add `--no-sample-header` to omit it. The old `--compare-page` and
+`--preview-page` flags still work for backward compatibility.
 
 ### Text That Survives the Fax
 
@@ -224,6 +261,95 @@ disturbs them. Opt in with `--recover-text on`.
 <p align="center">
   <img src="docs/readme/text_rescue.png" alt="Text rescue features — top row: preserve_text whitens colored highlight chips so dark labels read cleanly through the 1-bit threshold; bottom row: recover_text OCRs text baked into the halftoned billboard and recolors it BLACK or WHITE by the #808080 rule" width="100%">
 </p>
+
+### Verify exactly what was changed (`--report`)
+
+Every run can emit a JSON report (`--report out.report.json`) listing what the
+pipeline decided per page — the halftone screen it chose, the estimated
+transmission seconds, every legibility warning, and **every word the OCR-driven
+passes recoloured** with its polarity, the field-luma the polarity was decided
+against, and the WCAG contrast it landed at. That makes the layered text passes
+auditable rather than magic: open the report, search for any word in the
+document, see precisely which polarity it carried and why.
+
+<details>
+<summary><strong>Example excerpt</strong> — one page, abbreviated</summary>
+
+```json
+{
+  "mode": "fax",
+  "input": "Prestige_Estates_v3.pdf",
+  "output": "Prestige_Estates_v3.fax.pdf",
+  "input_bytes": 603870,
+  "output_bytes": 492627,
+  "pages": [
+    {
+      "index": 1,
+      "encoded_bytes": 492050,
+      "est_transmission_s": 274.9,
+      "photo_regions": 1,
+      "photo_fraction": 0.2948,
+      "dither": "green-noise",
+      "text_binarize": "contrast",
+      "already_bilevel": false,
+      "ocr_text": {
+        "scope": "doc",
+        "engine": "rapidocr-onnxruntime",
+        "words_recognized": 184,
+        "words_recolored_black": 174,
+        "words_recolored_white": 10,
+        "words": [
+          { "text": "Prestige",   "conf": 0.987, "polarity": "white",
+            "rendered": true,  "field_gray":  42.0, "wcag_contrast": 12.1,
+            "bbox": [120, 88, 412, 156] },
+          { "text": "Investor",   "conf": 0.974, "polarity": "black",
+            "rendered": true,  "field_gray": 248.0, "wcag_contrast": 16.4,
+            "bbox": [120, 252, 388, 296] }
+          /* …182 more words… */
+        ]
+      },
+      "recover_text": {
+        "scope": "image",
+        "engine": "rapidocr-onnxruntime",
+        "words_recognized": 7,
+        "words_recolored_black": 0,
+        "words_recolored_white": 7,
+        "words": [
+          { "text": "VILLA",      "conf": 0.992, "polarity": "white",
+            "rendered": true,  "field_gray":  88.4, "wcag_contrast":  9.8,
+            "bbox": [1042, 612, 1304, 692] },
+          { "text": "DEL",        "conf": 0.988, "polarity": "white",
+            "rendered": true,  "field_gray":  91.2, "wcag_contrast":  9.4,
+            "bbox": [1310, 612, 1416, 692] },
+          { "text": "MAR",        "conf": 0.985, "polarity": "white",
+            "rendered": true,  "field_gray":  90.6, "wcag_contrast":  9.5,
+            "bbox": [1424, 612, 1572, 692] }
+          /* …4 more words… */
+        ]
+      },
+      "warnings": ["text_preserved:395kpx"]
+    }
+  ],
+  "total_est_transmission_s": 274.9,
+  "warnings": ["text_preserved:395kpx"]
+}
+```
+
+Read this as: *page 1 was halftoned with `green-noise`, will take ~275 seconds
+to transmit at G3 superfine, and the OCR-driven recolor pass touched **191
+words**. Of those, **184 outside the photo** were recoloured by the
+`--ocr-text` polarity rule (174 BLACK on light fields, 10 WHITE on dark header
+bars), and **7 inside the photo** were recoloured WHITE by `--recover-text`
+because they sit on the dark billboard with `field_gray ≈ 90` (< 128, so the
+#808080 rule paints them WHITE).*
+
+The `warnings` array uses short greppable keys: `text_preserved:Nkpx` (preserve-text
+pass lifted N thousand pixels), `inverted_or_heavy_black` (>45 % of the output is
+black ink — likely an inverted page), `wash_out_color:light` (light-yellow / pale
+hues that won't survive bilevel), and `expressive_screen:mezzotint` (you asked
+for a screen that compresses poorly — flagged honestly).
+
+</details>
 
 ## Input formats — fax a PDF, or a Word, PowerPoint, Excel, or image file
 
@@ -263,8 +389,9 @@ retain the intermediate PDF next to the output.
     ├── agents/
     │   └── openai.yaml     # optional Codex UI sidecar
     ├── assets/
-    │   ├── bluenoise_64.npy # cached void-and-cluster blue-noise matrix
-    │   └── Oswald.ttf       # bundled display font for the comparison title
+    │   ├── bluenoise_64.npy       # cached void-and-cluster blue-noise matrix
+    │   ├── greennoise_64_s4.0.npy # cached green-noise (clustered FM) matrix
+    │   └── Oswald.ttf             # bundled display font for the comparison title
     ├── scripts/
     │   ├── check_deps.py   # verify/install dependencies
     │   ├── optimize_pdf.py # CLI entry point (optimize, and optionally --send)
@@ -279,7 +406,7 @@ retain the intermediate PDF next to the output.
 
 ## Requirements
 
-- **Python 3.9+** with: PyMuPDF, Pillow, numpy, opencv-python-headless, img2pdf
+- **Python 3.10+** with: PyMuPDF, Pillow, numpy, opencv-python-headless, img2pdf
   (`pip install -r requirements.txt`). `requests` is also installed, needed only
   to **send** faxes.
 - **`rapidocr-onnxruntime`** (optional but recommended) — drives the OCR-based
@@ -308,6 +435,19 @@ location:
 |---|---|---|
 | **Claude Code** | `~/.claude/skills/pdf-fax-optimizer/` | `.claude/skills/pdf-fax-optimizer/` |
 | **OpenAI Codex** | `~/.codex/skills/pdf-fax-optimizer/` | `.agents/skills/pdf-fax-optimizer/` |
+
+**Easiest** — grab the packaged skill from the
+**[latest release](https://github.com/petehottelet/pdf-fax-optimizer/releases/latest)**
+(`pdf-fax-optimizer.zip`) and unzip it directly into one of the locations above:
+
+```bash
+# Claude Code (user-level)
+curl -L -o pdf-fax-optimizer.zip \
+  https://github.com/petehottelet/pdf-fax-optimizer/releases/latest/download/pdf-fax-optimizer.zip
+unzip pdf-fax-optimizer.zip -d ~/.claude/skills/
+```
+
+Or clone the repo and copy the inner skill folder into place:
 
 ```bash
 git clone https://github.com/petehottelet/pdf-fax-optimizer.git
@@ -347,9 +487,9 @@ The scripts are a normal CLI:
 python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
     --report output.report.json --sample 1
 
-# Compare the 6-up of halftone methods on page 1 and pick by eye
+# Compare halftone methods side-by-side and pick by eye (6-up, 12-up, max…)
 python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \
-    --compare-page 1
+    --sample 1 --panels 6
 
 # Strict Group-3 transmissibility (1728-px scanline) for a real fax machine
 python pdf-fax-optimizer/scripts/optimize_pdf.py input.pdf -o output.fax.pdf \

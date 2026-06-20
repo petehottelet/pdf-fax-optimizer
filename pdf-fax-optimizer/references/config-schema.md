@@ -101,7 +101,8 @@ omitted keys fall back to the documented defaults.
 }
 ```
 
-> Note: `--compare-page N`, `--compare-methods a,b,c`, `--sample N`, and
+> Note: `--sample N`, `--panels K`, `--sample-include LIST`,
+> `--no-sample-header`, `--compare-page N`, `--compare-methods a,b,c`, and
 > `--recover-text-preview N` are CLI-only flags, not config keys.
 
 ## Annotated example — faxing scanned clinical paperwork with a photo
