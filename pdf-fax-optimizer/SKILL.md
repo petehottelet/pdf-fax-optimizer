@@ -8,18 +8,6 @@ description: >-
   muddy or unreadable fax, keep small text and signatures readable, halftone
   photos, or send a fax. Triggers: "fax this Word doc", "prep these scans to
   fax", "send this as a fax".
-compatibility: >-
-  Requires Python 3.10+ with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
-  img2pdf. Sending a fax additionally needs the requests package; faxing
-  Office/OpenDocument files (Word/PowerPoint/Excel) needs LibreOffice (headless);
-  the OCR-driven text-polarity passes (--ocr-text and --recover-text) need
-  rapidocr-onnxruntime (self-contained, no system binary). Without OCR the
-  skill still works — it falls back to the binarizer's default black-on-white
-  for document text and skips the within-image recover-text recolor. No CLI
-  tools are required for PDF/image input. Verify deps with
-  `python3 -m pdf_fax_optimizer.check_deps`; install with
-  `pip install pdf-fax-optimizer` (add the `[ocr,send]` extras for OCR and
-  cloud-fax sending) or `pip install -r requirements.txt`.
 ---
 
 # PDF FAX
@@ -47,6 +35,20 @@ python3 -m pdf_fax_optimizer.check_deps   # detect-only; prints the pip command
 # then, if anything is missing:
 pip install pdf-fax-optimizer             # or: pip install -r requirements.txt
 ```
+
+## Requirements
+
+Requires Python 3.10+ with PyMuPDF (fitz), Pillow, numpy, opencv-python, and
+img2pdf. Sending a fax additionally needs the requests package; faxing
+Office/OpenDocument files (Word/PowerPoint/Excel) needs LibreOffice (headless);
+the OCR-driven text-polarity passes (`--ocr-text` and `--recover-text`) need
+rapidocr-onnxruntime (self-contained, no system binary). Without OCR the skill
+still works — it falls back to the binarizer's default black-on-white for
+document text and skips the within-image recover-text recolor. No CLI tools are
+required for PDF/image input. Verify deps with `python3 -m
+pdf_fax_optimizer.check_deps`; install with `pip install pdf-fax-optimizer` (add
+the `[ocr,send]` extras for OCR and cloud-fax sending) or `pip install -r
+requirements.txt`.
 
 ## How it works
 

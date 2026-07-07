@@ -10,6 +10,7 @@
   <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-blue.svg">
   <img alt="Claude + Codex" src="https://img.shields.io/badge/Claude%20%2B%20Codex-agent%20ready-555555.svg">
   <img alt="Agent Skill (SKILL.md)" src="https://img.shields.io/badge/Agent%20Skill-SKILL.md-orange.svg">
+  <a href="https://skills.sh/petehottelet/pdf-fax-optimizer"><img alt="skills.sh" src="https://skills.sh/b/petehottelet/pdf-fax-optimizer"></a>
   <img alt="Formats: PDF, DOCX, PPTX, XLSX, image" src="https://img.shields.io/badge/formats-.pdf%20%7C%20.docx%20%7C%20.pptx%20%7C%20.xlsx%20%7C%20image-777777.svg">
   <img alt="Output: fax PDF, TIFF, JSON, PNG preview" src="https://img.shields.io/badge/output-.fax.pdf%20%7C%20.tiff%20%7C%20.json%20%7C%20.png-8A2BE2.svg">
 </p>
@@ -19,6 +20,24 @@ AI coding agent to **maximize document quality and readability when sending a
 PDF over a fax network.** It converts a PDF into a fax-native **1-bit bilevel
 CCITT-G4** PDF (or Class-F multipage TIFF) that survives the lossy Group-3
 transmission and **arrives legible on the receiving machine.**
+
+## Try it in 30 seconds
+
+Install it as an agent skill with the [`skills`](https://skills.sh) CLI:
+
+```bash
+npx skills add petehottelet/pdf-fax-optimizer
+```
+
+Then ask your agent:
+
+> Make `contract.pdf` fax-ready. Prioritize legibility, generate a preview sheet, and warn me before sending if anything may arrive unreadable.
+
+<p align="center">
+  <img src="docs/readme/text_rescue.png" alt="Before/after: colored highlight chips and image-baked captions recolored to solid black or white so small text and signatures stay legible after a 1-bit fax threshold" width="100%">
+</p>
+
+<p align="center"><em>Original vs. fax-safe output — the skill protects small text, signatures, forms, and scans before transmission.</em></p>
 
 > **A fax's whole job is to be READ.** That is the single most important thing
 > about this skill. Fax transmission is low-resolution, 1-bit, and lossy by
@@ -92,6 +111,42 @@ The `SKILL.md` format is an open standard. This skill is built and tested for
   up to 20 panels (every entry in the `SCREENS` registry alongside the colour
   / grayscale / default-fax references), all with a settings header that
   documents which options produced the sheet.
+
+## When to use this skill
+
+Use this skill when you need to:
+
+- fax a PDF, Word document, PowerPoint, Excel file, scan, or image
+- make a document **faxable** before sending
+- fix a **muddy, faint, low-contrast, or unreadable fax**
+- preserve **signatures, small text, form fields, screenshots, tables, or photo captions** through a 1-bit channel
+- generate a **fax preview / contact sheet** before transmission
+- produce fax-native **1-bit CCITT-G4 PDF or TIFF** output
+- send through **mFax, Phaxio,** or another cloud fax provider
+
+## When not to use this skill
+
+This skill is for documents that must **survive fax transmission**. Reach for a different tool when faxing isn't part of the request — it is not primarily for:
+
+- shrinking a PDF for **email** (use [pdf-email-optimizer](https://github.com/petehottelet/pdf-email-optimizer))
+- **merging, splitting, or editing** PDFs
+- **extracting tables or text**, or OCR-only workflows
+- converting documents for **web or print** publishing
+
+## Example workflow
+
+**User request:**
+
+> Make `intake-form.pdf` fax-ready. Preserve small text and signatures, generate a preview sheet, and tell me if anything may arrive unreadable.
+
+**What the skill does:**
+
+1. Inspects the document and picks a fax-safe resolution per page.
+2. Improves contrast and converts each page to 1-bit bilevel output.
+3. Writes fax-native PDF/TIFF (`CCITTFaxDecode` PDF or Class-F multipage TIFF).
+4. Generates a preview / contact sheet so you can confirm legibility before sending.
+5. Emits a JSON report with per-page decisions, warnings, and output paths.
+6. Asks for confirmation before sending through a cloud fax provider.
 
 ## Optimizing for the channel, not "fax-ifying" the document
 
@@ -505,16 +560,23 @@ ruff check .                      # lint
 
 ## Installing the skill
 
-`SKILL.md` is the open standard; the only difference between agents is **where**
-the skill folder lives. Copy the `pdf-fax-optimizer/` folder into the appropriate
-location:
+**Easiest** — install it with the [`skills`](https://skills.sh) CLI, which
+copies the skill into the right place for whichever agent you're using:
+
+```bash
+npx skills add petehottelet/pdf-fax-optimizer
+```
+
+`SKILL.md` is the open standard; to place it by hand, the only difference between
+agents is **where** the skill folder lives. Copy the `pdf-fax-optimizer/` folder
+into the appropriate location:
 
 | Agent | Location (user-level) | Location (project-level) |
 |---|---|---|
 | **Claude Code** | `~/.claude/skills/pdf-fax-optimizer/` | `.claude/skills/pdf-fax-optimizer/` |
 | **OpenAI Codex** | `~/.codex/skills/pdf-fax-optimizer/` | `.agents/skills/pdf-fax-optimizer/` |
 
-**Easiest** — grab the packaged skill from the
+**Or grab the release zip** — download the packaged skill from the
 **[latest release](https://github.com/petehottelet/pdf-fax-optimizer/releases/latest)**
 (`pdf-fax-optimizer.zip`) and unzip it directly into one of the locations above:
 
