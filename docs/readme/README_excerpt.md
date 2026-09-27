@@ -1,9 +1,6 @@
 ## Visual gallery — Prestige Estates fax cover sheet
 
-The screenshots below are all generated end-to-end through the real pipeline
-by the example generator
-on `Prestige_Estates_v3.docx`. Re-run that script to refresh them after a
-pipeline change.
+The screenshots below show the fax pipeline applied to a synthetic real-estate cover sheet.
 
 ### Halftone style comparison
 

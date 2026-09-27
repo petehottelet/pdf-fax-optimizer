@@ -44,11 +44,10 @@ def _mime(path: str) -> str:
 
 def _result(resp) -> dict:
     ok = 200 <= resp.status_code < 300
-    try:
-        body = resp.json()
-    except Exception:
-        body = {"raw": resp.text[:2000]}
-    return {"ok": ok, "status_code": resp.status_code, "response": body}
+    # Provider payloads can echo credentials, contact details, and account IDs.
+    # HTTP status communicates success without recording arbitrary response data.
+    return {"ok": ok, "status_code": resp.status_code,
+            "response": {"message": "Provider response details omitted"}}
 
 
 def _require_requests():
@@ -123,9 +122,9 @@ def send_generic(path, to, *, url, auth_header=None, basic_user=None,
     if extra:
         data.update(extra)
     if dry_run:
-        a = "header:" + (auth_header[:12] + "***" if auth_header else "")
+        a = "header:Authorization [REDACTED]" if auth_header else "none"
         if auth:
-            a = "basic:" + basic_user + ":***"
+            a = "basic:[REDACTED]"
         return _dry("generic", url, a, data, path, file_field=file_field)
     requests = _require_requests()
     with open(path, "rb") as fh:
